@@ -10,7 +10,9 @@ After building you can launch it directly on a VT or from another Wayland/X11 se
 
 ### With Steam integration
 Start gamescope with the `-e` flag and start Steam with it like:
-`gamescope -e -- steam -tenfoot -steamos`
+```
+gamescope -e -- steam -tenfoot -steamos
+```
 
 ### Testing other X11 clients
 Launch other clients from a second terminal via `DISPLAY=:1 glxgears` assuming gamescope's XWayland instance uses DISPLAY id 1. You can also start Steam this way on it, but the best integration is ensured when running in integration mode.
