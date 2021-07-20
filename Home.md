@@ -24,4 +24,4 @@ If you run gamescope on a VT it'll try to use hardware planes if possible. This 
 gamescope -e -d -w 3840 -h 2160 -- steam -tenfoot -steamos
 ```
 
-You can use this command also in a nested session. The `-l`, `-d` parameters will be ignored then.
+You can use this command also in a nested session. The `-L`, `-d` parameters will be ignored then.
