@@ -554,11 +554,21 @@ static constexpr uint32_t s_kSteamDeckLCDRates[] =
 	60,
 };
 
-static constexpr uint32_t s_kSteamDeckOLEDRates[] =
+static constexpr uint32_t s_kSteamDeckOLEDSDCRates[] =
 {
 	45, 47, 48, 49, 
 	50, 51, 53, 55, 56, 59, 
 	60, 62, 64, 65, 66, 68, 
+	72, 73, 76, 77, 78, 
+	80, 81, 82, 84, 85, 86, 87, 88, 
+	90, 
+};
+
+static constexpr uint32_t s_kSteamDeckOLEDBOERates[] =
+{
+	45, 47, 48, 49, 
+	50, 53, 56, 59, 
+	60, 62, 64, 66, 68, 
 	72, 73, 76, 77, 78, 
 	80, 81, 82, 84, 85, 86, 87, 88, 
 	90, 
@@ -2128,12 +2138,12 @@ namespace gamescope
 			if ( pProduct->product == kPIDGalileoSDC )
 			{
 				m_Mutable.eKnownDisplay = GAMESCOPE_KNOWN_DISPLAY_STEAM_DECK_OLED_SDC;
-				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckOLEDRates );
+				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckOLEDSDCRates );
 			}
 			else if ( pProduct->product == kPIDGalileoBOE )
 			{
 				m_Mutable.eKnownDisplay = GAMESCOPE_KNOWN_DISPLAY_STEAM_DECK_OLED_BOE;
-				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckOLEDRates );
+				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckOLEDBOERates );
 			}
 			else
 			{
