@@ -19,9 +19,9 @@ If running RadeonSI clients with older cards (GFX8 and below), currently have to
 
 ```
 git submodule update --init
-meson build/
+meson -Dforce_fallback_for=vkroots,wlroots,libliftoff build/
 ninja -C build/
-build/gamescope -- <game>
+build/src/gamescope -- <game>
 ```
 
 Install with:
@@ -70,6 +70,31 @@ See `gamescope --help` for a full list of options.
 * `-S stretch`: use stretch scaling, the game will fill the window. (e.g. 4:3 to 16:9)
 * `-b`: create a border-less window.
 * `-f`: create a full-screen window.
+
+## Gamescope Utilities
+
+Gamescope has several utilities that get installed along with the Gamescope binary. There are two user-interactive binaries, gamescopestream and gamescopectl, while a third binary, gamescopereaper, is used by gamescope itself.
+
+**gamescopestream**:
+
+gamescopestream can be used to capture a Pipewire stream and dma-buf from a gamescope window into a new Wayland window. It can be run without any arguments as `gamescopestream`, or you can pass along a Steam AppID. For example, Counter-Strike 2 has a Steam AppID of 730. If Counter-Strike 2 is launched with gamescope, you can use `gamescopestream app_id 730` to capture your gamescope window and export it into a new window for recording or streaming purposes. This is also how Steam's Game Recording feature works within an embedded gamescope session.
+
+**gamescopectl**:
+
+`gamescopectl` is a debugging utility which can be used to set convars, execute debugging commands, and list information about active gamescope instances.
+
+For a full list of convars and commands, run `gamescopectl help` while a gamescope instance exists. Generally, convars will be set with a 0 for disabled or a 1 for enabled, although some convars will have additional values.
+
+```sh
+# Force gamescope to always composite (i.e. never use direct scan-out
+gamescopectl composite_force 1
+
+# Stop forcing gamescope to always composite (i.e. go back to using direct scan-out when possible)
+gamescopectl composite_force 0
+
+# Take a screenshot of the active gamescope window
+gamescopectl screenshot
+```
 
 ## Reshade support
 
