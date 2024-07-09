@@ -60,10 +60,12 @@ gamescope -w 1920 -h 1080 -W 3440 -H 1440 -b -- %command%
 If your display supports HDR, you can use gamescope embedded with the DRM backend, or if your desktop environment supports HDR and runs off a Wayland session, you can use gamescope nested with the Wayland backend.
 
 ```sh
-# Set resolution to 1440p, specify the DRM backend, enable HDR, and launch the Steam Deck client in an embedded gamescope-session (i.e. not within a desktop environment)
+# Set resolution to 1440p, specify the DRM backend, enable HDR, and launch the Steam Deck client
+# embedded in a gamescope-session (i.e. outside of a desktop environment)
 gamescope -e -h 1440 -w 2560 --backend drm --hdr-enabled -- steam -steamdeck
 
-# Set resolution to 4K, limit refresh rate to 120fps, specify the Wayland backend, set window to fullscreen, enable HDR, enable adaptive sync, and launch the standard Steam client in GamepadUI mode
+# Set resolution to 4K, limit refresh rate to 120fps, specify the Wayland backend, set window to fullscreen
+# enable HDR, enable adaptive sync, and launch the standard Steam client in GamepadUI mode
 gamescope -f -h 2160 -w 3840 -r 120 --backend wayland --hdr-enabled --adaptive-sync -- steam -gamepadui
 ```
 
@@ -92,7 +94,7 @@ gamescopestream can be used to capture a Pipewire stream and dma-buf from a game
 
 **gamescopectl**:
 
-`gamescopectl` is a debugging utility which can be used to set convars, execute debugging commands, and list information about active gamescope instances.
+gamescopectl is a debugging utility which can be used to set convars, execute debugging commands, and list information about active gamescope instances.
 
 For a full list of convars and commands, run `gamescopectl help` while a gamescope instance exists. Generally, convars will be set with a 0 for disabled or a 1 for enabled, although some convars will have additional values.
 
