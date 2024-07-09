@@ -23,6 +23,7 @@ meson -Dforce_fallback_for=vkroots,wlroots,libliftoff build/
 ninja -C build/
 build/src/gamescope -- <game>
 ```
+We force fallback for vkroots, wlroots, and libliftoff because gamescope relies on untagged work, and sometimes has its own forks/branches of projects with fixes and features that we need.
 
 Install with:
 
@@ -54,6 +55,16 @@ gamescope -r 30 -- %command%
 
 # Run the game at 1080p, but scale output to a fullscreen 3440×1440 pillarboxed ultrawide window
 gamescope -w 1920 -h 1080 -W 3440 -H 1440 -b -- %command%
+```
+
+If your display supports HDR, you can use gamescope embedded with the DRM backend, or if your desktop environment supports HDR and runs off a Wayland session, you can use gamescope nested with the Wayland backend.
+
+```sh
+# Set resolution to 1440p, specify the DRM backend, enable HDR, and launch the Steam Deck client in an embedded gamescope-session (i.e. not within a desktop environment)
+gamescope -e -h 1440 -w 2560 --backend drm --hdr-enabled -- steam -steamdeck
+
+# Set resolution to 4K, limit refresh rate to 120fps, specify the Wayland backend, set window to fullscreen, enable HDR, enable adaptive sync, and launch the standard Steam client in GamepadUI mode
+gamescope -f -h 2160 -w 3840 -r 120 --backend wayland --hdr-enabled --adaptive-sync -- steam -gamepadui
 ```
 
 ## Options
