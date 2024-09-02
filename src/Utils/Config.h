@@ -13,10 +13,38 @@ namespace gamescope
     {
         struct DisplayConfiguration_t
         {
+            struct DynamicVFPModeGeneration_t
+            {
+                bool dynamic_vfp; // always true. our "key" for the variant.
+
+                uint32_t vsync = 0; // vertical sync
+                uint32_t vbp = 0; // vertical back porch
+                std::vector<uint32_t> vfp; // vertical front porch
+            };
+
+            struct DynamicClockModeGeneration_t
+            {
+                bool dynamic_clock; // always true. our "key" for the variant.
+
+                uint32_t hdisplay = 0;
+                uint32_t hfp = 0;
+                uint32_t hsync = 0;
+                uint32_t hbp = 0;
+
+                uint32_t vdisplay = 0;
+                uint32_t vfp = 0;
+                uint32_t vsync = 0;
+                uint32_t vbp = 0;
+            };
+
             struct KnownDisplay_t
             {
                 std::string pretty_name;
                 std::optional<std::vector<uint32_t>> refresh_rates;
+                // not hooked up yet
+                //std::optional<std::variant<
+                //    DynamicVFPModeGeneration_t,
+                //    DynamicClockModeGeneration_t>> mode_generation;
             };
 
             struct DisplayMapping_t

@@ -29,6 +29,7 @@
                     80, 81, 82, 84, 85, 86, 87, 88,
                     90
                 ],
+                // No colorimetry entry here, as we load it from the EDID.
                 "mode_generation":
                 {
                     "dynamic_vfp": true,
@@ -64,6 +65,7 @@
                     80, 81, 82, 84, 85, 86, 87, 88,
                     90
                 ],
+                // No colorimetry entry here, as we load it from the EDID.
                 "mode_generation":
                 {
                     "dynamic_vfp": true,
@@ -86,7 +88,7 @@
             //
             // Pick-first filter for display mapping to known panels.
             { "vendor": "VLV", "product": "0x3003", "panel": "steamdeck_oled_sdc" },
-            { "vendor": "VLV", "product": "0x3004", "panel": "steamdeck_oled_boe" },
+            { "vendor": "VLV", "product": "0x3004", "panel": "steamdeck_oled_boe" }
         ]
     }
 }
