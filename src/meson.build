@@ -95,6 +95,7 @@ required_wlroots_features = ['xwayland']
 src = [
   'Backends/HeadlessBackend.cpp',
   'Backends/WaylandBackend.cpp',
+  'Utils/Config.cpp',
   'Utils/TempFiles.cpp',
   'Utils/Version.cpp',
   'Utils/Process.cpp',
@@ -169,7 +170,7 @@ gamescope_version = vcs_tag(
   executable(
     'gamescope',
     src, reshade_src, gamescope_version,
-    include_directories : [reshade_include],
+    include_directories : [reshade_include, glaze_inc],
     dependencies: [
       dep_wayland, dep_x11, dep_xdamage, dep_xcomposite, dep_xrender, dep_xext, dep_xfixes,
       dep_xxf86vm, dep_xres, glm_dep, drm_dep, wayland_server,

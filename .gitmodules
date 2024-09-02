@@ -19,3 +19,6 @@
 [submodule "thirdparty/SPIRV-Headers"]
 	path = thirdparty/SPIRV-Headers
 	url = https://github.com/KhronosGroup/SPIRV-Headers/
+[submodule "thirdparty/glaze"]
+	path = thirdparty/glaze
+	url = https://github.com/stephenberry/glaze

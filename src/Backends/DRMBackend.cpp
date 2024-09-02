@@ -1,5 +1,7 @@
 // DRM output stuff
 
+#include "Utils/Config.h"
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -399,7 +401,7 @@ namespace gamescope
 			char szModel[16]{};
 			const char *pszMake = ""; // Not owned, no free. This is a pointer to pnp db or szMakePNP.
 			GamescopeKnownDisplays eKnownDisplay = GAMESCOPE_KNOWN_DISPLAY_UNKNOWN;
-			std::span<const uint32_t> ValidDynamicRefreshRates{};
+			std::vector<uint32_t> ValidDynamicRefreshRates{};
 			std::vector<uint8_t> EdidData; // Raw, unmodified.
 			std::vector<BackendMode> BackendModes;
 
@@ -2121,71 +2123,64 @@ namespace gamescope
 
 		drm_log.infof("Connector %s -> %s - %s", m_Mutable.szName, m_Mutable.szMakePNP, m_Mutable.szModel );
 
-		const bool bIsDeckHDUnofficial = ( m_Mutable.szMakePNP == "DHD"sv && m_Mutable.szModel == "DeckHD-1200p"sv );
-
-		const bool bSteamDeckDisplay =
-			( m_Mutable.szMakePNP == "WLC"sv && m_Mutable.szModel == "ANX7530 U"sv ) ||
-			( m_Mutable.szMakePNP == "ANX"sv && m_Mutable.szModel == "ANX7530 U"sv ) ||
-			( m_Mutable.szMakePNP == "VLV"sv && m_Mutable.szModel == "ANX7530 U"sv ) ||
-			( m_Mutable.szMakePNP == "VLV"sv && m_Mutable.szModel == "Jupiter"sv ) ||
-			( m_Mutable.szMakePNP == "VLV"sv && m_Mutable.szModel == "Galileo"sv );
-
-		if ( bSteamDeckDisplay )
+		bool bConfigHasSetRefreshRates = false;
+		bool bConfigHasSetColorimetry = false;
+		bool bConfigHasSetHDRInfo = false;
 		{
-			static constexpr uint32_t kPIDGalileoSDC = 0x3003;
-			static constexpr uint32_t kPIDGalileoBOE = 0x3004;
+			auto pConfig = Config::Get();
 
-			if ( pProduct->product == kPIDGalileoSDC )
+			if ( auto *pKnownDisplay = pConfig->display_configuration.GetKnownDisplay( m_Mutable.szMakePNP, pProduct->product, m_Mutable.szModel ) )
 			{
-				m_Mutable.eKnownDisplay = GAMESCOPE_KNOWN_DISPLAY_STEAM_DECK_OLED_SDC;
-				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckOLEDRates );
+				drm_log.infof( "Using known display info for \'%s\'", pKnownDisplay->pretty_name.c_str() );
+
+				if ( pKnownDisplay->refresh_rates )
+				{
+					bConfigHasSetRefreshRates = true;
+					m_Mutable.ValidDynamicRefreshRates = *pKnownDisplay->refresh_rates;
+				}
 			}
-			else if ( pProduct->product == kPIDGalileoBOE )
+
+#if 0
+			if ( !sKnownDisplay.empty() )
 			{
-				m_Mutable.eKnownDisplay = GAMESCOPE_KNOWN_DISPLAY_STEAM_DECK_OLED_BOE;
-				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckOLEDRates );
+				if ( auto &jsonDisplay = config["display_configuration"]["known_displays"][sKnownDisplay] )
+				{
+					std::string *pDisplayNiceName = jsonDisplay["pretty_name"].get_if<std::string>();
+
+					drm_log.infof( "Using known display info for %s (%s)", pDisplayNiceName ? pDisplayNiceName->c_str() : "No Nice Name", sKnownDisplay.c_str() );
+
+					if ( glz::json_t::array_t *pRefreshRates = jsonDisplay["refresh_rates"].get_if<glz::json_t::array_t>() )
+					{
+						bConfigHasSetRefreshRates = true;
+						for ( glz::json_t &jsonRate : *pRefreshRates )
+							m_Mutable.ValidDynamicRefreshRates.emplace_back( static_cast<uint32_t>( jsonRate.get<double>() ) );
+					}
+
+					if ( glz::json_t::object_t *pColorimetry = jsonDisplay["colorimetry"].get_if<glz::json_t::object_t>() )
+					{
+						bConfigHasSetColorimetry = true;
+						glz::json_t::object_t &jsonColorimetry = *pColorimetry;
+
+						m_Mutable.DisplayColorimetry =
+						{
+							.primaries =
+							{
+								.r = glm::vec2{ jsonColorimetry["r"][0].get<double>(), jsonColorimetry["r"][1].get<double>() },
+								.g = glm::vec2{ jsonColorimetry["g"][0].get<double>(), jsonColorimetry["g"][1].get<double>() },
+								.b = glm::vec2{ jsonColorimetry["b"][0].get<double>(), jsonColorimetry["b"][1].get<double>() },
+							},
+							.white =
+							{
+								glm::vec2{ jsonColorimetry["w"][0].get<double>(), jsonColorimetry["w"][1].get<double>() },
+							}
+						};
+					}
+				}
 			}
-			else
-			{
-				m_Mutable.eKnownDisplay = GAMESCOPE_KNOWN_DISPLAY_STEAM_DECK_LCD;
-				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckLCDRates );
-			}
+#endif
 		}
 
-		if ( bIsDeckHDUnofficial )
-		{
-			static constexpr uint32_t kPIDJupiterDHD = 0x4001;
-
-			if ( pProduct->product == kPIDJupiterDHD )
-			{
-				m_Mutable.eKnownDisplay = GAMESCOPE_KNOWN_DISPLAY_STEAM_DECK_LCD_DHD;
-				m_Mutable.ValidDynamicRefreshRates = std::span( s_kSteamDeckLCDRates );
-			}
-		}
-
-		// Colorimetry
-		const char *pszColorOverride = getenv( "GAMESCOPE_INTERNAL_COLORIMETRY_OVERRIDE" );
-		if ( pszColorOverride && *pszColorOverride && GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL )
-		{
-			if ( sscanf( pszColorOverride, "%f %f %f %f %f %f %f %f",
-				&m_Mutable.DisplayColorimetry.primaries.r.x, &m_Mutable.DisplayColorimetry.primaries.r.y,
-				&m_Mutable.DisplayColorimetry.primaries.g.x, &m_Mutable.DisplayColorimetry.primaries.g.y,
-				&m_Mutable.DisplayColorimetry.primaries.b.x, &m_Mutable.DisplayColorimetry.primaries.b.y,
-				&m_Mutable.DisplayColorimetry.white.x, &m_Mutable.DisplayColorimetry.white.y ) == 8 )
-			{
-				drm_log.infof( "[colorimetry]: GAMESCOPE_INTERNAL_COLORIMETRY_OVERRIDE detected" );
-			}
-			else
-			{
-				drm_log.errorf( "[colorimetry]: GAMESCOPE_INTERNAL_COLORIMETRY_OVERRIDE specified, but could not parse \"rx ry gx gy bx by wx wy\"" );
-			}
-		}
-		else if ( m_Mutable.eKnownDisplay == GAMESCOPE_KNOWN_DISPLAY_STEAM_DECK_LCD )
-		{
-			drm_log.infof( "[colorimetry]: Steam Deck LCD detected. Using known colorimetry" );
-			m_Mutable.DisplayColorimetry = displaycolorimetry_steamdeck_measured;
-		}
-		else
+		if ( !bConfigHasSetColorimetry )
 		{
 			// Steam Deck OLED has calibrated chromaticity coordinates in the EDID
 			// for each unit.
@@ -2200,6 +2195,11 @@ namespace gamescope
 					.primaries = { { pChroma->red_x, pChroma->red_y }, { pChroma->green_x, pChroma->green_y }, { pChroma->blue_x, pChroma->blue_y } },
 					.white = { pChroma->white_x, pChroma->white_y },
 				};
+			}
+			else
+			{
+				// Fallback to 709
+				m_Mutable.DisplayColorimetry = displaycolorimetry_709;
 			}
 		}
 
@@ -3775,4 +3775,5 @@ namespace gamescope
 	{
 		return Set( new CDRMBackend{} );
 	}
+
 }

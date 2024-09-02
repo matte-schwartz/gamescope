@@ -1,3 +1,4 @@
+#include "Utils/Config.h"
 #include <X11/Xlib.h>
 
 #include <cstdio>
@@ -660,6 +661,8 @@ int main(int argc, char **argv)
 {
 	g_argc = argc;
 	g_argv = argv;
+
+	gamescope::ConfigManager::Instance().Init();
 
 	// Force disable this horrible broken layer.
 	setenv("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", "1", 1);

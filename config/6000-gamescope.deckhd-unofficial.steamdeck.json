@@ -1,0 +1,41 @@
+{
+    "+display_configuration":
+    {
+        "+known_displays":
+        {
+            "steamdeck_deckhd_unofficial":
+            {
+                // Steam Deck DeckHD - Unofficial Screen Replacement
+                //
+                // When this was MR'ed to Gamescope originally -- it was never MRed with any custom colorimetry.
+                // Someone should fix that.
+                "pretty_name": "Steam Deck DeckHD - Unofficial Screen Replacement",
+                "colorimetry": { "r": [ 0.603, 0.349 ], "g": [ 0.335, 0.571 ], "b": [ 0.163, 0.115 ], "w": [ 0.296, 0.307 ] },
+                "refresh_rates":
+                [
+                    40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+                    50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+                    60
+                ],
+                "mode_generation":
+                {
+                    "dynamic_clock": true,
+
+                    "hdisplay": 1200,
+                    "hfp": 40,
+                    "hsync": 20,
+                    "hbp": 40,
+
+                    "vdisplay": 1920,
+                    "vfp": 18,
+                    "vsync": 2,
+                    "vbp": 20
+                }
+            }
+        },
+        "+display_mapping":
+        [
+            { "vendor": "DHD", "model": "DeckHD-1200p", "product": "0x4001", "panel": "steamdeck_deckhd_unofficial" }
+        ]
+    }
+}

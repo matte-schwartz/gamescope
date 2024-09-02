@@ -4,7 +4,7 @@ project(
   'cpp',
   meson_version: '>=0.58.0',
   default_options: [
-    'cpp_std=c++20',
+    'cpp_std=c++23',
     'warning_level=2',
     'force_fallback_for=wlroots,libliftoff,vkroots',
   ],
@@ -48,6 +48,7 @@ hwdata_dep = dependency('hwdata', required : false)
 dep_x11 = dependency('x11')
 dep_wayland = dependency('wayland-client')
 vulkan_dep = dependency('vulkan')
+glaze_inc = include_directories( 'thirdparty/glaze/include' )
 
 if get_option('enable_openvr_support')
   openvr_dep = dependency('openvr', version: '>= 2.7', required : false)

@@ -1,0 +1,53 @@
+{
+    // +'s at the start of keys are ignored, they simply make stuff append to existing objects.
+    // instead of replacing them.
+    "+display_configuration":
+    {
+        "+known_displays":
+        {
+            // Children here represent known displays, and overrides for those known displays for
+            // things that are not in the EDID, or are not representable in EDID/MIPI/etc.
+
+            "steamdeck_lcd":
+            {
+                // Steam Deck LCD
+                "pretty_name": "Steam Deck LCD",
+
+                // Measured Colorimetry
+                "colorimetry": { "r": [ 0.603, 0.349 ], "g": [ 0.335, 0.571 ], "b": [ 0.163, 0.115 ], "w": [ 0.296, 0.307 ] },
+
+                // Spec Colorimetry
+                //"colorimetry": { "r": [ 0.602, 0.355 ], "g": [ 0.340, 0.574 ], "b": [ 0.164, 0.121 ], "w": [ 0.3070, 0.3220 ] },
+
+                "refresh_rates":
+                [
+                    40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+                    50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+                    60
+                ],
+                "mode_generation":
+                {
+                    "dynamic_clock": true,
+
+                    "hdisplay": 800,
+                    "hfp": 40,
+                    "hsync": 4,
+                    "hbp": 40,
+
+                    "vdisplay": 1280,
+                    "vfp": 30,
+                    "vsync": 4,
+                    "vbp": 8
+                }
+            }
+        },
+        "+display_mapping":
+        [
+            // Pick-first filter for display mapping to known panels.
+            { "vendor": "WLC", "model": "ANX7530 U", "panel": "steamdeck_lcd" },
+            { "vendor": "ANX", "model": "ANX7530 U", "panel": "steamdeck_lcd" },
+            { "vendor": "VLV", "model": "ANX7530 U", "panel": "steamdeck_lcd" },
+            { "vendor": "VLV", "model": "ANX7530 U", "panel": "steamdeck_lcd" }
+        ]
+    }
+}
