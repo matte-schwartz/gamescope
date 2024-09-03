@@ -1,0 +1,37 @@
+{
+    "+display_configuration": {
+        "+known_displays": {
+            "rogally": {
+                // ROG Ally Family
+                // Proof of concept
+                // (To-do) Refresh rates should probably be calculated properly and validated, not process of elimination like these... works for now though
+                // (To-do) Figure out how to hook up custom colorimetry (these are just EDID values below)
+
+                "pretty_name": "Asus ROG Ally",
+                "colorimetry": { "r": [ 0.6416, 0.3222 ], "g": [ 0.2998, 0.6035 ], "b": [ 0.1464, 0.0605 ], "w": [ 0.3125, 0.3291 ] },
+                "refresh_rates": [
+                    60, 61, 62, 63, 64,
+                    100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+                    110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+                    120
+                ],
+                "mode_generation": {
+                    "dynamic_clock": true,
+
+                    "hdisplay": 1920, 
+                    "hfp": 48,
+                    "hsync": 32,
+                    "hbp": 80,
+
+                    "vdisplay": 1080, 
+                    "vfp": 54,
+                    "vsync": 2,
+                    "vbp": 8
+                }
+            }
+        },
+        "+display_mapping": [
+            { "vendor": "TMX", "model": "TL070FVXS01-0", "panel": "rogally" }
+        ]
+    }
+}
