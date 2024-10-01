@@ -1,5 +1,5 @@
 name: Issue report
-description: File an issue report
+description: File an issue report within gamescope
 body:
 - type: checkboxes
   attributes:
