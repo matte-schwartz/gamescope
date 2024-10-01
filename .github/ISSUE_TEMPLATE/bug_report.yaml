@@ -1,5 +1,5 @@
 name: Issue report
-description: File an issue report within gamescope
+description: File an issue report
 body:
 - type: checkboxes
   attributes:
@@ -39,6 +39,7 @@ body:
         - **Distro**: SteamOS 3.6.15 (`cat /etc/os-release`)
         - **CPU**: 32-core AMD Ryzen Threadripper 7970X (`inxi` or `cat /proc/cpuinfo`)
         - **GPU**: Advanced Micro Devices [AMD/ATI] Navi 31 [Radeon RX 7900 XT/7900 XTX/7900M] (`lspci -nn | grep VGA` or `lshw -C display -numeric` or `vulkaninfo --summary | grep deviceName`
+        - **Driver Version**: Mesa 24.2.3 or NVIDIA 560.35.03 (`vulkaninfo --summary | grep driverInfo` or `nvidia-smi`)
     value: |
         - Distro: 
         - CPU: 
