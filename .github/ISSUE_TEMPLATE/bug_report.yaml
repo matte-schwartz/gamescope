@@ -63,6 +63,18 @@ body:
     render: markdown
   validations:
     required: false
+- type: checkboxes
+  id: backend
+  attributes:
+    label: Which gamescope backends have the issue you are reporting?
+    description: You may select more than one.
+    options:
+      - label: Wayland (default for nested gamescope)
+      - label: SDL
+      - label: DRM (default for embedded gamescope, i.e. gamescope-session)
+      - label: OpenVR
+  validations:
+    required: true
 - type: textarea
   attributes:
     label: Logging, screenshots, or anything else
