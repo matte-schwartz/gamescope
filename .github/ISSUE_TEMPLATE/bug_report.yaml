@@ -1,5 +1,6 @@
 name: Issue report
 description: File an issue report
+title: "[{{ backend }}]"
 body:
 - type: checkboxes
   attributes:
