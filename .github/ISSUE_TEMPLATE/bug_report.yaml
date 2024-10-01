@@ -44,6 +44,7 @@ body:
         - Distro: 
         - CPU: 
         - GPU: 
+        - Driver Version: 
     render: markdown
   validations:
     required: false
