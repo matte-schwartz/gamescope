@@ -1,6 +1,5 @@
 name: Issue report
 description: File an issue report
-title: "[{{ backend }}]"
 body:
 - type: checkboxes
   attributes:
@@ -71,8 +70,8 @@ body:
     description: You may select more than one.
     options:
       - label: Wayland (default for nested gamescope)
-      - label: SDL
       - label: DRM (default for embedded gamescope, i.e. gamescope-session)
+      - label: SDL
       - label: OpenVR
   validations:
     required: true
