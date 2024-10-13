@@ -8,3 +8,4 @@ option('enable_gamescope',           type : 'boolean', value : true, description
 option('enable_gamescope_wsi_layer', type : 'boolean', value : true, description: 'Build Gamescope layer')
 option('enable_openvr_support',      type : 'boolean', value : true, description: 'OpenVR Integrations')
 option('benchmark', type: 'feature', description: 'Benchmark tools')
+option('enable_gamescope_session',   type : 'boolean', value : false, description: 'Install gamescope-session')

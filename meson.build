@@ -96,5 +96,9 @@ if get_option('enable_gamescope')
   subdir('src')
 endif
 
+if get_option('enable_gamescope_session')
+  subdir('session')
+endif
+
 # Handle default script/config stuff
 meson.add_install_script('default_scripts_install.sh')
