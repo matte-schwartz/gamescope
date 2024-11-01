@@ -52,6 +52,7 @@ extern std::string g_reshade_effect;
 using namespace std::literals;
 
 static LogScope xdg_log( "xdg_backend" );
+static LogScope wl_touch_log( "wl_touch" );
 
 template <typename Func, typename... Args>
 auto CallWithAllButLast(Func pFunc, Args&&... args)
@@ -394,6 +395,7 @@ namespace gamescope
         uint32_t m_uPointerEnterSerial = 0;
         bool m_bMouseEntered = false;
         bool m_bKeyboardEntered = false;
+        bool m_bTouchEntered = false;
 
         wl_event_queue *m_pQueue = nullptr;
         std::shared_ptr<wl_display> m_pDisplayWrapper;
@@ -450,6 +452,15 @@ namespace gamescope
         void Wayland_Keyboard_RepeatInfo( wl_keyboard *pKeyboard, int32_t nRate, int32_t nDelay );
         static const wl_keyboard_listener s_KeyboardListener;
 
+        void Wayland_Touch_Down( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, wl_surface *pSurface, int32_t nId, wl_fixed_t fX, wl_fixed_t fY );
+        void Wayland_Touch_Up( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, int32_t nId );
+        void Wayland_Touch_Motion( wl_touch *pTouch, uint32_t uTime, int32_t nId, wl_fixed_t fX, wl_fixed_t fY );
+        void Wayland_Touch_Frame( wl_touch *pTouch );
+        void Wayland_Touch_Cancel( wl_touch *pTouch );
+        void Wayland_Touch_Shape( wl_touch *pTouch, int32_t nId, wl_fixed_t fMajor, wl_fixed_t fMinor );
+        void Wayland_Touch_Orientation( wl_touch *pTouch, int32_t nId, wl_fixed_t fOrientation );
+        static const wl_touch_listener s_TouchListener;
+
 	    void Wayland_RelativePointer_RelativeMotion( zwp_relative_pointer_v1 *pRelativePointer, uint32_t uTimeHi, uint32_t uTimeLo, wl_fixed_t fDx, wl_fixed_t fDy, wl_fixed_t fDxUnaccel, wl_fixed_t fDyUnaccel );
         static const zwp_relative_pointer_v1_listener s_RelativePointerListener;
     };
@@ -484,6 +495,16 @@ namespace gamescope
         .key           = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Keyboard_Key ),
         .modifiers     = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Keyboard_Modifiers ),
         .repeat_info   = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Keyboard_RepeatInfo ),
+    };
+    const wl_touch_listener CWaylandInputThread::s_TouchListener =
+    {
+        .down          = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Down ),
+        .up            = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Up ),
+        .motion        = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Motion ),
+        .frame         = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Frame ),
+        .cancel        = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Cancel ),
+        .shape         = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Shape ),
+        .orientation   = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Orientation ),
     };
     const zwp_relative_pointer_v1_listener CWaylandInputThread::s_RelativePointerListener =
     {
@@ -2562,6 +2583,20 @@ namespace gamescope
                 wl_keyboard_add_listener( m_pKeyboard, &s_KeyboardListener, this );
             }
         }
+
+        if ( !!( uCapabilities & WL_SEAT_CAPABILITY_TOUCH ) != !!m_pTouch )
+        {
+            if ( m_pTouch )
+            {
+                wl_touch_release( m_pTouch );
+                m_pTouch = nullptr;
+            }
+            else
+            {
+                m_pTouch = wl_seat_get_touch( m_pSeat );
+                wl_touch_add_listener( m_pTouch, &s_TouchListener, this );
+            }
+        }
     }
 
     void CWaylandInputThread::Wayland_Seat_Name( wl_seat *pSeat, const char *pName )
@@ -2764,6 +2799,116 @@ namespace gamescope
     void CWaylandInputThread::Wayland_Keyboard_RepeatInfo( wl_keyboard *pKeyboard, int32_t nRate, int32_t nDelay )
     {
     }
+
+    // Touch
+
+    void CWaylandInputThread::Wayland_Touch_Down( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, wl_surface *pSurface, int32_t nId, wl_fixed_t fX, wl_fixed_t fY )
+    {
+        if ( !( wl_proxy_get_tag( (wl_proxy *)pSurface ) == &GAMESCOPE_plane_tag ) )
+            return;
+        
+        CWaylandPlane *pPlane = (CWaylandPlane *)wl_surface_get_user_data( pSurface );
+        if ( !pPlane )
+            return;
+        m_pCurrentCursorPlane = pPlane;
+        m_bTouchEntered = true;
+        
+        if ( !cv_wayland_mouse_warp_without_keyboard_focus && !m_bKeyboardEntered ) {
+            wl_touch_log.debugf( "Wayland_Touch_Down: Skipping event due to focus" );
+            return;
+        }
+
+        if ( !m_pCurrentCursorPlane ) {
+            wl_touch_log.warnf( "Wayland_Touch_Down: No current cursor plane, skipping" );
+            return;
+        }
+
+        auto oState = m_pCurrentCursorPlane->GetCurrentState();
+        if ( !oState ) {
+            wl_touch_log.warnf( "Wayland_Touch_Down: No state in current cursor plane, skipping" );
+            return;
+        }
+
+        uint32_t uScale = oState->uFractionalScale;
+        double flX = ( wl_fixed_to_double( fX ) * uScale / 120.0 + oState->nDestX ) / g_nOutputWidth;
+        double flY = ( wl_fixed_to_double( fY ) * uScale / 120.0 + oState->nDestY ) / g_nOutputHeight;
+
+        wl_touch_log.debugf( "Wayland_Touch_Down: Transformed coordinates - flX: %f, flY: %f\n", flX, flY );
+
+        wlserver_lock();
+        wlserver_touchdown( flX, flY, nId, ++m_uFakeTimestamp );
+        wlserver_unlock();
+
+        wl_touch_log.debugf( "Wayland_Touch_Down: Touch event processed" );
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Up( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, int32_t nId )
+    {
+        wl_touch_log.debugf( "Wayland_Touch_Up: Entered with id %d", nId );
+
+        if ( !cv_wayland_mouse_warp_without_keyboard_focus && !m_bKeyboardEntered ) {
+            wl_touch_log.debugf( "Wayland_Touch_Up: Skipping event due to focus" );
+            return;
+        }
+
+        wlserver_lock();
+        wlserver_touchup( nId, ++m_uFakeTimestamp );
+        wlserver_unlock();
+
+        wl_touch_log.debugf( "Wayland_Touch_Up: Touch event processed" );
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Motion( wl_touch *pTouch, uint32_t uTime, int32_t nId, wl_fixed_t fX, wl_fixed_t fY )
+    {
+        if ( !cv_wayland_mouse_warp_without_keyboard_focus && !m_bKeyboardEntered ) {
+            wl_touch_log.debugf( "Wayland_Touch_Motion: Skipping event due to focus" );
+            return;
+        }
+
+        if ( !m_pCurrentCursorPlane ) {
+            wl_touch_log.warnf( "Wayland_Touch_Motion: No current cursor plane, skipping" );
+            return;
+        }
+
+        auto oState = m_pCurrentCursorPlane->GetCurrentState();
+        if ( !oState ) {
+            wl_touch_log.warnf( "Wayland_Touch_Motion: No state in current cursor plane, skipping" );
+            return;
+        }
+
+        uint32_t uScale = oState->uFractionalScale;
+        double flX = ( wl_fixed_to_double( fX ) * uScale / 120.0 + oState->nDestX ) / g_nOutputWidth;
+        double flY = ( wl_fixed_to_double( fY ) * uScale / 120.0 + oState->nDestY ) / g_nOutputHeight;
+
+        wl_touch_log.debugf( "Wayland_Touch_Motion: Transformed coordinates - flX: %f, flY: %f\n", flX, flY );
+
+        wlserver_lock();
+        wlserver_touchmotion( flX, flY, nId, ++m_uFakeTimestamp );
+        wlserver_unlock();
+
+        wl_touch_log.debugf( "Wayland_Touch_Motion: Touch event processed" );
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Frame( wl_touch *pTouch )
+    {
+        wl_touch_log.debugf( "Wayland_Touch_Frame: Entered" );
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Cancel( wl_touch *pTouch )
+    {
+        wl_touch_log.debugf( "Wayland_Touch_Cancel: Entered" );
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Shape( wl_touch *pTouch, int32_t nId, wl_fixed_t fMajor, wl_fixed_t fMinor )
+    {
+        wl_touch_log.debugf( "Wayland_Touch_Shape: Entered with id %d, Major: %f, Minor: %f\n", nId, wl_fixed_to_double(fMajor), wl_fixed_to_double(fMinor) );
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Orientation( wl_touch *pTouch, int32_t nId, wl_fixed_t fOrientation )
+    {
+        wl_touch_log.debugf( "Wayland_Touch_Orientation: Entered with id %d, Orientation: %f\n", nId, wl_fixed_to_double(fOrientation) );
+    }
+
 
     // Relative Pointer
 
