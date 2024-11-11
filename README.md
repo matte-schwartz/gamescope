@@ -105,6 +105,19 @@ gamescope -r 30 -- %command%
 gamescope -w 1920 -h 1080 -W 3440 -H 1440 -b -- %command%
 ```
 
+From a desktop terminal, you can also run gamescope with programs other than Steam:
+
+```sh
+# Run vkcube in gamescope
+gamescope -- vkcube
+
+# Run glxgears in fullscreen 2160p, with a frame rate of 24 FPS
+gamescope -r 24 -w 3840 -h 2160 -- glxgears
+```
+
+> [!WARNING]
+> Trying to use launch arguments without a `--` separator before `%command%` or a program being run will not start gamescope correctly.
+
 **Embedded**
 
 When launching from a Virtual Terminal, gamescope's DRM backend can act as a standalone session. The easiest way to run games with this backend is by running the entire Steam client within gamescope. 
