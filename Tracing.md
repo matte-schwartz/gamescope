@@ -39,3 +39,5 @@ trace-cmd record -i \
 	-e "i915:i915_gem_request_wait_begin" \
 	-e "i915:i915_gem_request_wait_end"
 ```
+
+There is also tracing support built into the Steam Deck's client in gamescope-session, accessed via Settings -> Developer -> Enable System Tracing. If you're on SteamOS, this is best accompanied by the [SteamOS Devkit Client](https://gitlab.steamos.cloud/devkit/steamos-devkit) which allows you to capture traces and view them via SSH.
