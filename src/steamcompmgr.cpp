@@ -1416,12 +1416,14 @@ void MouseCursor::UpdatePosition()
 		m_x = pConstraint->current.cursor_hint.x;
 		m_y = pConstraint->current.cursor_hint.y;
 		m_bConstrained = true;
+		xwm_log.debugf( "MouseCursor_Constrained::UpdatePosition: x=%d y=%d", m_x, m_y );
 	}
 	else
 	{
 		m_x = wlserver.mouse_surface_cursorx;
 		m_y = wlserver.mouse_surface_cursory;
 		m_bConstrained = false;
+		xwm_log.debugf( "MouseCursor_NonConstrained::UpdatePosition: x=%d y=%d", m_x, m_y );
 	}
 	wlserver_unlock();
 }
@@ -1448,6 +1450,7 @@ void MouseCursor::checkSuspension()
 					wlserver_fake_mouse_pos( window->GetGeometry().nWidth - 1, window->GetGeometry().nHeight - 1 );
 					wlserver_mousehide();
 					wlserver_unlock();
+					xwm_log.debugf("MouseCursor::checkSuspension: Hiding cursor");
 				}
 			}
 
@@ -1461,6 +1464,7 @@ void MouseCursor::checkSuspension()
 	else
 	{
 		wlserver.bCursorHidden = false;
+		xwm_log.debugf("MouseCursor::checkSuspension: Showing cursor");
 	}
 
 	wlserver.bCursorHasImage = !m_imageEmpty;

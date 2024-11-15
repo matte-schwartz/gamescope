@@ -155,6 +155,7 @@ namespace gamescope
                     eis_device_remove( pDevice );
                     eis_device_unref( pDevice );
                     eis_client_set_user_data( pClient, nullptr );
+                    gamescope_ei.debugf( "Device closed" );
                 }
                 break;
 
@@ -169,6 +170,7 @@ namespace gamescope
                 {
                     wlserver_lock();
                     wlserver_mousemotion( eis_event_pointer_get_dx( pEisEvent ), eis_event_pointer_get_dy( pEisEvent ), ++s_uSequence );
+                    gamescope_ei.debugf( "Pointer motion: %f %f", eis_event_pointer_get_dx( pEisEvent ), eis_event_pointer_get_dy( pEisEvent ) );
                     wlserver_unlock();
                 }
                 break;
@@ -177,6 +179,7 @@ namespace gamescope
                 {
                     wlserver_lock();
                     wlserver_mousewarp( eis_event_pointer_get_absolute_x( pEisEvent ), eis_event_pointer_get_absolute_y( pEisEvent ), ++s_uSequence, true );
+                    gamescope_ei.debugf( "Pointer motion absolute: %f %f", eis_event_pointer_get_absolute_x( pEisEvent ), eis_event_pointer_get_absolute_y( pEisEvent ) );
                     wlserver_unlock();
                 }
                 break;
@@ -185,6 +188,7 @@ namespace gamescope
                 {
                     wlserver_lock();
                     wlserver_mousebutton( eis_event_button_get_button( pEisEvent ), eis_event_button_get_is_press( pEisEvent ), ++s_uSequence );
+                    gamescope_ei.debugf( "Button: %d %d", eis_event_button_get_button( pEisEvent ), eis_event_button_get_is_press( pEisEvent ) );
                     wlserver_unlock();
                 }
                 break;
@@ -193,6 +197,7 @@ namespace gamescope
                 {
                     wlserver_lock();
                     wlserver_mousewheel( eis_event_scroll_get_dx( pEisEvent ), eis_event_scroll_get_dy( pEisEvent ), ++s_uSequence );
+                    gamescope_ei.debugf( "Scroll: %f %f", eis_event_scroll_get_dx( pEisEvent ), eis_event_scroll_get_dy( pEisEvent ) );
                     wlserver_unlock();
                 }
                 break;
@@ -208,6 +213,7 @@ namespace gamescope
                 {
                     wlserver_lock();
                     wlserver_key( eis_event_keyboard_get_key( pEisEvent ), eis_event_keyboard_get_key_is_press( pEisEvent ), ++s_uSequence );
+                    gamescope_ei.debugf( "Key: %d %d", eis_event_keyboard_get_key( pEisEvent ), eis_event_keyboard_get_key_is_press( pEisEvent ) );
                     wlserver_unlock();
                 }
                 break;
@@ -233,6 +239,7 @@ namespace gamescope
 
                     wlserver_lock();
                     wlserver_mousewheel( flScrollX, flScrollY, ++s_uSequence );
+                    gamescope_ei.debugf( "Scroll: %f %f", flScrollX, flScrollY );
                     wlserver_unlock();
                 }
                 break;

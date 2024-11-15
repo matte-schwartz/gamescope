@@ -2619,6 +2619,7 @@ namespace gamescope
 
         wlserver_lock();
         wlserver_touchmotion( flX, flY, 0, ++m_uFakeTimestamp );
+        xdg_log.debugf( "Pointer motion %f %f", flX, flY );
         wlserver_unlock();
     }
     void CWaylandInputThread::Wayland_Pointer_Button( wl_pointer *pPointer, uint32_t uSerial, uint32_t uTime, uint32_t uButton, uint32_t uState )
@@ -2629,6 +2630,7 @@ namespace gamescope
 
         wlserver_lock();
         wlserver_mousebutton( uButton, uState == WL_POINTER_BUTTON_STATE_PRESSED, ++m_uFakeTimestamp );
+        xdg_log.debugf( "Pointer button %d %d %d %d", uSerial, uTime, uButton, uState );
         wlserver_unlock();
     }
     void CWaylandInputThread::Wayland_Pointer_Axis( wl_pointer *pPointer, uint32_t uTime, uint32_t uAxis, wl_fixed_t fValue )
@@ -2673,6 +2675,7 @@ namespace gamescope
 
         wlserver_lock();
         wlserver_mousewheel( flX, flY, ++m_uFakeTimestamp );
+        xdg_log.debugf( "Mouse wheel: %f, %f", flX, flY );
         wlserver_unlock();
     }
 
@@ -2775,6 +2778,7 @@ namespace gamescope
 
         wlserver_lock();
         wlserver_mousemotion( wl_fixed_to_double( fDxUnaccel ), wl_fixed_to_double( fDyUnaccel ), ++m_uFakeTimestamp );
+        xdg_log.debugf( "RelativePointer: %f %f", wl_fixed_to_double( fDxUnaccel ), wl_fixed_to_double( fDyUnaccel ) );
         wlserver_unlock();
     }
 

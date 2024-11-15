@@ -336,6 +336,7 @@ static void wlserver_perform_rel_pointer_motion(double unaccel_dx, double unacce
 	assert( wlserver_is_lock_held() );
 
 	wlr_relative_pointer_manager_v1_send_relative_motion( wlserver.relative_pointer_manager, wlserver.wlr.seat, 0, unaccel_dx, unaccel_dy, unaccel_dx, unaccel_dy );
+	wl_log.debugf("wlserver_perform_rel_pointer_motion %f %f", unaccel_dx, unaccel_dy);
 }
 
 static void wlserver_handle_pointer_motion(struct wl_listener *listener, void *data)
@@ -343,6 +344,7 @@ static void wlserver_handle_pointer_motion(struct wl_listener *listener, void *d
 	struct wlr_pointer_motion_event *event = (struct wlr_pointer_motion_event *) data;
 
 	wlserver_mousemotion(event->unaccel_dx, event->unaccel_dy, event->time_msec);
+	wl_log.debugf("wlserver_handle_pointer_motion %f %f", event->unaccel_dx, event->unaccel_dy);
 }
 
 void wlserver_open_steam_menu( bool qam )
@@ -366,6 +368,7 @@ static void wlserver_handle_pointer_button(struct wl_listener *listener, void *d
 	struct wlr_pointer_button_event *event = (struct wlr_pointer_button_event *) data;
 
 	wlr_seat_pointer_notify_button( wlserver.wlr.seat, event->time_msec, event->button, event->state );
+	wl_log.debugf("wlserver_handle_pointer_button %d %d", event->button, event->state);
 }
 
 static void wlserver_handle_pointer_axis(struct wl_listener *listener, void *data)
@@ -381,6 +384,7 @@ static void wlserver_handle_pointer_frame(struct wl_listener *listener, void *da
 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
 
 	bump_input_counter();
+	wl_log.debugf("wlserver_handle_pointer_frame");
 }
 
 static inline uint32_t TouchClickModeToLinuxButton( gamescope::TouchClickMode eTouchClickMode )
@@ -408,6 +412,7 @@ static void wlserver_handle_touch_down(struct wl_listener *listener, void *data)
 	struct wlr_touch_down_event *event = (struct wlr_touch_down_event *) data;
 
 	wlserver_touchdown( event->x, event->y, event->touch_id, event->time_msec );
+	wl_log.debugf("wlserver_handle_touch_down %d %f %f", event->touch_id, event->x, event->y);
 }
 
 static void wlserver_handle_touch_up(struct wl_listener *listener, void *data)
@@ -416,6 +421,7 @@ static void wlserver_handle_touch_up(struct wl_listener *listener, void *data)
 	struct wlr_touch_up_event *event = (struct wlr_touch_up_event *) data;
 
 	wlserver_touchup( event->touch_id, event->time_msec );
+	wl_log.debugf("wlserver_handle_touch_up %d", event->touch_id);
 }
 
 static void wlserver_handle_touch_motion(struct wl_listener *listener, void *data)
@@ -424,6 +430,7 @@ static void wlserver_handle_touch_motion(struct wl_listener *listener, void *dat
 	struct wlr_touch_motion_event *event = (struct wlr_touch_motion_event *) data;
 
 	wlserver_touchmotion( event->x, event->y, event->touch_id, event->time_msec );
+	wl_log.debugf("wlserver_handle_touch_motion %d %f %f", event->touch_id, event->x, event->y);
 }
 
 static void wlserver_new_input(struct wl_listener *listener, void *data)
