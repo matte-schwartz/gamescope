@@ -1453,6 +1453,7 @@ void MouseCursor::checkSuspension()
 
 			// We're hiding the cursor, force redraw if we were showing it
 			if (window && !m_imageEmpty ) {
+				xwm_log.debugf("Hiding cursor");
 				hasRepaintNonBasePlane = true;
 				nudge_steamcompmgr();
 			}
@@ -1473,6 +1474,7 @@ void MouseCursor::setDirty()
 	// We can't prove it's empty until checking again
 	m_imageEmpty = false;
 	m_dirty = true;
+	xwm_log.debugf("Cursor dirty");
 }
 
 bool MouseCursor::setCursorImage(char *data, int w, int h, int hx, int hy)
@@ -1576,6 +1578,7 @@ bool MouseCursor::getTexture()
 {
 	if (!m_dirty) {
 		return !m_imageEmpty;
+		xwm_log.debugf("Cursor not dirty");
 	}
 
 	auto *image = XFixesGetCursorImage(m_ctx->dpy);
@@ -1727,8 +1730,10 @@ void MouseCursor::GetDesiredSize( int& nWidth, int &nHeight )
 
 void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, struct FrameInfo_t *frameInfo)
 {
-	if ( m_imageEmpty || wlserver.bCursorHidden )
+	if ( m_imageEmpty || wlserver.bCursorHidden ) {
+		xwm_log.debugf("Cursor not dirty");
 		return;
+	}
 
 	int winX = x();
 	int winY = y();
@@ -2231,11 +2236,16 @@ static void paint_pipewire()
 gamescope::ConVar<int> cv_cursor_composite{ "cursor_composite", 1, "0 = Never composite a cursor. 1 = Composite cursor when not nested. 2 = Always composite a cursor manually" };
 bool ShouldDrawCursor()
 {
-	if ( cv_cursor_composite == 2 )
+	if ( cv_cursor_composite == 2 ) {
+		xwm_log.infof( "Compositing cursor." );
 		return true;
+	}
 
-	if ( cv_cursor_composite == 0 )
+
+	if ( cv_cursor_composite == 0 ) {
+		xwm_log.infof( "Not compositing cursor." );
 		return false;
+	}
 
 	return g_bForceRelativeMouse || !GetBackend()->GetNestedHints();
 }
@@ -7861,9 +7871,6 @@ steamcompmgr_main(int argc, char **argv)
 
 		if ( GetBackend()->GetNestedHints() && !g_bForceRelativeMouse )
 		{
-			const bool bImageEmpty =
-				( global_focus.cursor && global_focus.cursor->imageEmpty() ) &&
-				( !window_is_steam( global_focus.inputFocusWindow ) );
 
 			const bool bHasPointerConstraint = global_focus.cursor->IsConstrained();
 
@@ -7873,7 +7880,7 @@ steamcompmgr_main(int argc, char **argv)
 
 			const bool bExcludedAppId = uAppId && gamescope::Algorithm::Contains( s_uRelativeMouseFilteredAppids, uAppId );
 
-			const bool bRelativeMouseMode = bImageEmpty && bHasPointerConstraint && !bExcludedAppId;
+			const bool bRelativeMouseMode = bHasPointerConstraint && !bExcludedAppId;
 
 			GetBackend()->GetNestedHints()->SetRelativeMouseMode( bRelativeMouseMode );
 		}
