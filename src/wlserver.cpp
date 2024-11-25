@@ -2375,8 +2375,7 @@ void wlserver_mousewarp( double x, double y, uint32_t time, bool bSynthetic )
 	wlserver_clampcursor();
 
 	wlserver.ulLastMovedCursorTime = get_time_in_nanos();
-	if ( !bSynthetic )
-		wlserver.bCursorHidden = !wlserver.bCursorHasImage;
+	wlserver.bCursorHidden = !wlserver.bCursorHasImage;
 
 	wlserver_oncursorevent();
 

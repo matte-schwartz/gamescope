@@ -83,7 +83,6 @@ public:
 	void UpdatePosition();
 
 	bool isHidden() { return wlserver.bCursorHidden || m_imageEmpty; }
-	bool imageEmpty() const { return m_imageEmpty; }
 
 	void undirty() { getTexture(); }
 
