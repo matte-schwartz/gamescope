@@ -392,6 +392,7 @@ namespace gamescope
 			char szName[32]{};
 			char szMakePNP[4]{};
 			char szModel[16]{};
+			char szDataAscii[16]{};
 			const char *pszMake = ""; // Not owned, no free. This is a pointer to pnp db or szMakePNP.
 			std::vector<uint32_t> ValidDynamicRefreshRates{};
 			DRMModeGenerator fnDynamicModeGenerator;
@@ -2125,19 +2126,26 @@ namespace gamescope
 			m_Mutable.pszMake = pnpIter->second.c_str();
 
 		const di_edid_display_descriptor *const *pDescriptors = di_edid_get_display_descriptors( pEdid );
-		for ( size_t i = 0; pDescriptors[i] != nullptr; i++ )
-		{
-			const di_edid_display_descriptor *pDesc = pDescriptors[i];
-			if ( di_edid_display_descriptor_get_tag( pDesc ) == DI_EDID_DISPLAY_DESCRIPTOR_PRODUCT_NAME )
-			{
-				// Max length of di_edid_display_descriptor_get_string is 14
-				// m_szModel is 16 bytes.
-				const char *pszModel = di_edid_display_descriptor_get_string( pDesc );
-				strncpy( m_Mutable.szModel, pszModel, sizeof( m_Mutable.szModel ) );
-			}
-		}
+        for ( size_t i = 0; pDescriptors[i] != nullptr; i++ )
+        {
+            const di_edid_display_descriptor *pDesc = pDescriptors[i];
+            if ( di_edid_display_descriptor_get_tag( pDesc ) == DI_EDID_DISPLAY_DESCRIPTOR_PRODUCT_NAME )
+            {
+                // Max length of di_edid_display_descriptor_get_string is 14
+                // m_szModel is 16 bytes.
+                const char *pszModel = di_edid_display_descriptor_get_string( pDesc );
+                strncpy( m_Mutable.szModel, pszModel, sizeof( m_Mutable.szModel ) );
+            } else if ( di_edid_display_descriptor_get_tag( pDesc ) == DI_EDID_DISPLAY_DESCRIPTOR_DATA_STRING )
+            {
+                // Max length of di_edid_display_descriptor_get_string is 14
+                // szDataAscii is 16 bytes.
+                const char *pszDataAscii = di_edid_display_descriptor_get_string( pDesc );
+                strncpy( m_Mutable.szDataAscii, pszDataAscii, sizeof( m_Mutable.szDataAscii ) );
+				m_Mutable.szDataAscii[ sizeof( m_Mutable.szDataAscii ) - 1 ] = '\0';
+            }
+        }
 
-		drm_log.infof("Connector %s -> %s - %s", m_Mutable.szName, m_Mutable.szMakePNP, m_Mutable.szModel );
+		drm_log.infof("Connector %s -> %s - %s - %s", m_Mutable.szName, m_Mutable.szMakePNP, m_Mutable.szModel, m_Mutable.szDataAscii );
 
 		bool bHasKnownColorimetry = false;
 		bool bHasKnownHDRInfo = false;
@@ -2145,7 +2153,7 @@ namespace gamescope
 		{
 			CScriptScopedLock script;
 
-			auto oKnownDisplay = script.Manager().Gamescope().Config.LookupDisplay( script, m_Mutable.szMakePNP, pProduct->product, m_Mutable.szModel );
+			auto oKnownDisplay = script.Manager().Gamescope().Config.LookupDisplay( script, m_Mutable.szMakePNP, pProduct->product, m_Mutable.szModel, m_Mutable.szDataAscii );
 			if ( oKnownDisplay )
 			{
 				sol::table tTable = oKnownDisplay->second;
