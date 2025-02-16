@@ -4922,6 +4922,13 @@ handle_wm_change_state(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, XClientMessag
 {
 	long state = ev->data.l[0];
 
+	// Don't allow overlays to become iconic
+	if (w->isOverlay || w->isExternalOverlay) {
+		xwm_log.debugf("Forcing NORMAL state for overlay window 0x%lx", w->xwayland().id);
+		set_wm_state(ctx, w->xwayland().id, ICCCM_NORMAL_STATE);
+		return;
+	}
+
 	if (state == ICCCM_ICONIC_STATE) {
 		xwm_log.debugf("Faking WM_CHANGE_STATE to ICONIC for window 0x%lx", w->xwayland().id);
 		set_wm_state( ctx, w->xwayland().id, ICCCM_ICONIC_STATE );
