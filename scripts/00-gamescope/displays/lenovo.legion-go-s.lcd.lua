@@ -63,6 +63,11 @@ gamescope.config.known_displays.legion_go_s_lcd = {
                 model   = "PN8007QB1-1",
                 product = 0x0800, -- decimal 2048
             },
+            {
+                vendor = "BOE",
+                model = "NS080WUM-LX1"
+                product = 0x0c00,
+            }
             -- TODO: More variants here
         }
         
