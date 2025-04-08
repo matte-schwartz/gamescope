@@ -5,6 +5,30 @@
 #include <cstdio>
 #include <optional>
 
+// For layer bit architecture logs.
+#ifndef GAMESCOPE_WSI_ARCH
+#if defined(__x86_64__)
+#define GAMESCOPE_WSI_ARCH "x64"
+#elif defined(__i386__)
+#define GAMESCOPE_WSI_ARCH "x86"
+#elif defined(__aarch64__)
+#define GAMESCOPE_WSI_ARCH "ARM64"
+#elif defined(__arm__)
+#define GAMESCOPE_WSI_ARCH "ARM"
+#elif defined(__powerpc64__) || defined(__ppc64__)
+#define GAMESCOPE_WSI_ARCH "ppc64"
+#elif defined(__powerpc__) || defined(__ppc__)
+#define GAMESCOPE_WSI_ARCH "ppc"
+#else
+#define GAMESCOPE_WSI_ARCH ""
+#endif
+#endif
+
+#ifndef GAMESCOPE_WSI_LOG
+#define GAMESCOPE_WSI_LOG(fmt, ...) \
+fprintf(stderr, "[Gamescope WSI " GAMESCOPE_WSI_ARCH "] " fmt, ##__VA_ARGS__)
+#endif
+
 namespace xcb {
 
   struct ReplyDeleter {
@@ -21,7 +45,7 @@ namespace xcb {
     xcb_intern_atom_cookie_t cookie = xcb_intern_atom(connection, false, name.length(), name.data());
     auto reply = Reply<xcb_intern_atom_reply_t>{ xcb_intern_atom_reply(connection, cookie, nullptr) };
     if (!reply) {
-      fprintf(stderr, "[Gamescope WSI] Failed to get xcb atom.\n");
+      GAMESCOPE_WSI_LOG("Failed to get xcb atom.\n");
       return std::nullopt;
     }
     xcb_atom_t atom = reply->atom;
@@ -37,12 +61,12 @@ namespace xcb {
     xcb_get_property_cookie_t cookie = xcb_get_property(connection, false, screen->root, atom, XCB_ATOM_CARDINAL, 0, sizeof(T) / sizeof(uint32_t));
     auto reply = Reply<xcb_get_property_reply_t>{ xcb_get_property_reply(connection, cookie, nullptr) };
     if (!reply) {
-      fprintf(stderr, "[Gamescope WSI] Failed to read T root window property.\n");
+      GAMESCOPE_WSI_LOG("Failed to read T root window property.\n");
       return std::nullopt;
     }
 
     if (reply->type != XCB_ATOM_CARDINAL) {
-      fprintf(stderr, "[Gamescope WSI] Atom of T was wrong type. Expected XCB_ATOM_CARDINAL.\n");
+      GAMESCOPE_WSI_LOG("Atom of T was wrong type. Expected XCB_ATOM_CARDINAL.\n");
       return std::nullopt;
     }
 
@@ -65,7 +89,7 @@ namespace xcb {
       auto reply = Reply<xcb_query_tree_reply_t>{ xcb_query_tree_reply(connection, cookie, nullptr) };
 
       if (!reply) {
-        fprintf(stderr, "[Gamescope WSI] getToplevelWindow: xcb_query_tree failed for window 0x%x.\n", window);
+        GAMESCOPE_WSI_LOG("getToplevelWindow: xcb_query_tree failed for window 0x%x.\n", window);
         return std::nullopt;
       }
 
@@ -80,7 +104,7 @@ namespace xcb {
     xcb_get_geometry_cookie_t cookie = xcb_get_geometry(connection, window);
     auto reply = Reply<xcb_get_geometry_reply_t>{ xcb_get_geometry_reply(connection, cookie, nullptr) };
     if (!reply) {
-      fprintf(stderr, "[Gamescope WSI] getWindowRect: xcb_get_geometry failed for window 0x%x.\n", window);
+      GAMESCOPE_WSI_LOG("getWindowRect: xcb_get_geometry failed for window 0x%x.\n", window);
       return std::nullopt;
     }
 
@@ -116,13 +140,13 @@ namespace xcb {
     auto reply = Reply<xcb_query_tree_reply_t>{ xcb_query_tree_reply(connection, cookie, nullptr) };
 
     if (!reply) {
-      fprintf(stderr, "[Gamescope WSI] getLargestObscuringWindowSize: xcb_query_tree failed for window 0x%x.\n", window);
+      GAMESCOPE_WSI_LOG("getLargestObscuringWindowSize: xcb_query_tree failed for window 0x%x.\n", window);
       return std::nullopt;
     }
 
     auto ourRect = getWindowRect(connection, window);
     if (!ourRect) {
-      fprintf(stderr, "[Gamescope WSI] getLargestObscuringWindowSize: getWindowRect failed for main window 0x%x.\n", window);
+      GAMESCOPE_WSI_LOG("getLargestObscuringWindowSize: getWindowRect failed for main window 0x%x.\n", window);
       return std::nullopt;
     }
 
