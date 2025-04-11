@@ -504,6 +504,7 @@ namespace gamescope
 
 			displaycolorimetry_t DisplayColorimetry = displaycolorimetry_709;
 			BackendConnectorHDRInfo HDR;
+			GamescopePanelOrientation eConfigOrientation = GAMESCOPE_PANEL_ORIENTATION_AUTO;
 		} m_Mutable;
 
 		GamescopePanelOrientation m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_AUTO;
@@ -2088,46 +2089,66 @@ namespace gamescope
 		return HackyDRMPresent( pFrameInfo, bAsync );
 	}
 
+	// To pass a readable value for orientation logging
+	static const char* orientationToString( GamescopePanelOrientation orientation )
+	{
+		switch ( orientation )
+		{
+			case GAMESCOPE_PANEL_ORIENTATION_AUTO: return "auto";
+			case GAMESCOPE_PANEL_ORIENTATION_0:    return "normal";
+			case GAMESCOPE_PANEL_ORIENTATION_90:   return "left";
+			case GAMESCOPE_PANEL_ORIENTATION_180:  return "upsidedown";
+			case GAMESCOPE_PANEL_ORIENTATION_270:  return "right";
+			default:                               return "unknown";
+		}
+	}
+
 	void CDRMConnector::UpdateEffectiveOrientation( const drmModeModeInfo *pMode )
 	{
 		if ( this->GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL && g_DesiredInternalOrientation != GAMESCOPE_PANEL_ORIENTATION_AUTO )
 		{
 			m_ChosenOrientation = g_DesiredInternalOrientation;
+			return;
+		}
+
+		if ( m_Mutable.eConfigOrientation != GAMESCOPE_PANEL_ORIENTATION_AUTO )
+		{
+			drm_log.infof( "Using config file for orientation %s", orientationToString( m_Mutable.eConfigOrientation ) );
+			m_ChosenOrientation = m_Mutable.eConfigOrientation;
+			return;
+		}
+
+		if ( this->GetProperties().panel_orientation )
+		{
+			switch ( this->GetProperties().panel_orientation->GetCurrentValue() )
+			{
+				case DRM_MODE_PANEL_ORIENTATION_NORMAL:
+					m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_0;
+					return;
+				case DRM_MODE_PANEL_ORIENTATION_BOTTOM_UP:
+					m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_180;
+					return;
+				case DRM_MODE_PANEL_ORIENTATION_LEFT_UP:
+					m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_90;
+					return;
+				case DRM_MODE_PANEL_ORIENTATION_RIGHT_UP:
+					m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_270;
+					return;
+				default:
+					break;
+			}
+		}
+
+		if ( this->GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL && pMode )
+		{
+			// Auto-detect portait mode for internal displays
+			m_ChosenOrientation = pMode->hdisplay < pMode->vdisplay
+				? GAMESCOPE_PANEL_ORIENTATION_270
+				: GAMESCOPE_PANEL_ORIENTATION_0;
 		}
 		else
 		{
-			if ( this->GetProperties().panel_orientation )
-			{
-				switch ( this->GetProperties().panel_orientation->GetCurrentValue() )
-				{
-					case DRM_MODE_PANEL_ORIENTATION_NORMAL:
-						m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_0;
-						return;
-					case DRM_MODE_PANEL_ORIENTATION_BOTTOM_UP:
-						m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_180;
-						return;
-					case DRM_MODE_PANEL_ORIENTATION_LEFT_UP:
-						m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_90;
-						return;
-					case DRM_MODE_PANEL_ORIENTATION_RIGHT_UP:
-						m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_270;
-						return;
-					default:
-						break;
-				}
-			}
-
-			if ( this->GetScreenType() == gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL && pMode )
-			{
-				// Auto-detect portait mode for internal displays
-				m_ChosenOrientation = pMode->hdisplay < pMode->vdisplay
-					? GAMESCOPE_PANEL_ORIENTATION_270
-					: GAMESCOPE_PANEL_ORIENTATION_0;
-			}
-			else
-			{
-				m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_0;
-			}
+			m_ChosenOrientation = GAMESCOPE_PANEL_ORIENTATION_0;
 		}
 	}
 
@@ -2211,6 +2232,8 @@ namespace gamescope
 
 				sol::optional<sol::table> otDynamicRefreshRates = tTable["dynamic_refresh_rates"];
 				sol::optional<sol::function> ofnDynamicModegen = tTable["dynamic_modegen"];
+
+				m_Mutable.eConfigOrientation = tTable.get_or( "orientation", GAMESCOPE_PANEL_ORIENTATION_AUTO );
 
 				if ( otDynamicRefreshRates && ofnDynamicModegen )
 				{

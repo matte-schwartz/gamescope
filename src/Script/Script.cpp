@@ -2,6 +2,7 @@
 #include "convar.h"
 #include "color_helpers.h"
 #include "../log.hpp"
+#include "../gamescope_shared.h"
 
 #include <filesystem>
 #include <algorithm>
@@ -108,6 +109,15 @@ namespace gamescope
                 { "warning", LOG_WARNING },
                 { "info", LOG_INFO },
                 { "debug", LOG_DEBUG },
+            }
+        );
+        m_Gamescope.Base.new_enum<GamescopePanelOrientation>( "panel_orientation",
+            {
+                { "auto",       GAMESCOPE_PANEL_ORIENTATION_AUTO },
+                { "normal",     GAMESCOPE_PANEL_ORIENTATION_0 },
+                { "left",       GAMESCOPE_PANEL_ORIENTATION_90 },
+                { "upsidedown", GAMESCOPE_PANEL_ORIENTATION_180 },
+                { "right",      GAMESCOPE_PANEL_ORIENTATION_270 },
             }
         );
         m_Gamescope.Base["log"] = []( LogPriority ePriority, std::string_view svText ) { s_ScriptLog.log( ePriority, svText ); };
