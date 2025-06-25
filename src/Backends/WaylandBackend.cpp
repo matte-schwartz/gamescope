@@ -562,6 +562,11 @@ namespace gamescope
         void Wayland_Keyboard_RepeatInfo( wl_keyboard *pKeyboard, int32_t nRate, int32_t nDelay );
         static const wl_keyboard_listener s_KeyboardListener;
 
+        void Wayland_Touch_Down( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, wl_surface *pSurface, int32_t nId, wl_fixed_t fX, wl_fixed_t fY );
+        void Wayland_Touch_Up( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, int32_t nId );
+        void Wayland_Touch_Motion( wl_touch *pTouch, uint32_t uTime, int32_t nId, wl_fixed_t fX, wl_fixed_t fY );
+        static const wl_touch_listener s_TouchListener;
+
 	    void Wayland_RelativePointer_RelativeMotion( zwp_relative_pointer_v1 *pRelativePointer, uint32_t uTimeHi, uint32_t uTimeLo, wl_fixed_t fDx, wl_fixed_t fDy, wl_fixed_t fDxUnaccel, wl_fixed_t fDyUnaccel );
         static const zwp_relative_pointer_v1_listener s_RelativePointerListener;
     };
@@ -596,6 +601,16 @@ namespace gamescope
         .key           = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Keyboard_Key ),
         .modifiers     = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Keyboard_Modifiers ),
         .repeat_info   = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Keyboard_RepeatInfo ),
+    };
+    const wl_touch_listener CWaylandInputThread::s_TouchListener =
+    {
+        .down = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Down ),
+        .up = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Up ),
+        .motion = WAYLAND_USERDATA_TO_THIS( CWaylandInputThread, Wayland_Touch_Motion ),
+        .frame = WAYLAND_NULL(),
+        .cancel = WAYLAND_NULL(),
+        .shape = WAYLAND_NULL(),
+        .orientation = WAYLAND_NULL(),
     };
     const zwp_relative_pointer_v1_listener CWaylandInputThread::s_RelativePointerListener =
     {
@@ -2970,6 +2985,20 @@ namespace gamescope
                 wl_keyboard_add_listener( m_pKeyboard, &s_KeyboardListener, this );
             }
         }
+
+        if ( !!( uCapabilities & WL_SEAT_CAPABILITY_TOUCH ) != !!m_pTouch )
+        {
+            if ( m_pTouch )
+            {
+                wl_touch_release( m_pTouch );
+                m_pTouch = nullptr;
+            }
+            else
+            {
+                m_pTouch = wl_seat_get_touch( m_pSeat );
+                wl_touch_add_listener( m_pTouch, &s_TouchListener, this );
+            }
+        }
     }
 
     void CWaylandInputThread::Wayland_Seat_Name( wl_seat *pSeat, const char *pName )
@@ -3087,6 +3116,56 @@ namespace gamescope
 
         wlserver_lock();
         wlserver_mousewheel( flX, flY, ++m_uFakeTimestamp );
+        wlserver_unlock();
+    }
+
+
+    void CWaylandInputThread::Wayland_Touch_Down( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, wl_surface *pSurface, int32_t nId, wl_fixed_t fX, wl_fixed_t fY )
+    {
+        if ( !IsSurfacePlane( pSurface ) )
+            return;
+
+        CWaylandPlane *pPlane = (CWaylandPlane *)wl_surface_get_user_data( pSurface );
+        if ( !pPlane )
+            return;
+
+        auto oState = pPlane->GetCurrentState();
+        if ( !oState )
+            return;
+
+        uint32_t uScale = oState->uFractionalScale;
+
+        double flX = ( wl_fixed_to_double( fX ) * uScale / WL_FRACTIONAL_SCALE_DENOMINATOR + oState->nDestX ) / g_nOutputWidth;
+        double flY = ( wl_fixed_to_double( fY ) * uScale / WL_FRACTIONAL_SCALE_DENOMINATOR + oState->nDestY ) / g_nOutputHeight;
+
+        wlserver_lock();
+        wlserver_touchdown( flX, flY, nId, ++m_uFakeTimestamp );
+        wlserver_unlock();
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Up( wl_touch *pTouch, uint32_t uSerial, uint32_t uTime, int32_t nId )
+    {
+        wlserver_lock();
+        wlserver_touchup( nId, ++m_uFakeTimestamp );
+        wlserver_unlock();
+    }
+
+    void CWaylandInputThread::Wayland_Touch_Motion( wl_touch *pTouch, uint32_t uTime, int32_t nId, wl_fixed_t fX, wl_fixed_t fY )
+    {
+        if ( !m_pCurrentCursorPlane )
+            return;
+
+        auto oState = m_pCurrentCursorPlane->GetCurrentState();
+        if ( !oState )
+            return;
+
+        uint32_t uScale = oState->uFractionalScale;
+
+        double flX = ( wl_fixed_to_double( fX ) * uScale / WL_FRACTIONAL_SCALE_DENOMINATOR + oState->nDestX ) / g_nOutputWidth;
+        double flY = ( wl_fixed_to_double( fY ) * uScale / WL_FRACTIONAL_SCALE_DENOMINATOR + oState->nDestY ) / g_nOutputHeight;
+
+        wlserver_lock();
+        wlserver_touchmotion( flX, flY, nId, ++m_uFakeTimestamp );
         wlserver_unlock();
     }
 
