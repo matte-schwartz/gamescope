@@ -601,6 +601,7 @@ struct drm_color_ctm2 {
 
 bool g_bSupportsAsyncFlips = false;
 bool g_bSupportsSyncObjs = false;
+bool g_bSupportsColorPipeline = false;
 
 extern gamescope::GamescopeModeGeneration g_eGamescopeModeGeneration;
 extern GamescopePanelOrientation g_DesiredInternalOrientation;
@@ -1332,7 +1333,7 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 		return false;
 	}
 
-	drmSetClientCap(drm->fd, DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE, 1);
+	g_bSupportsColorPipeline = drmSetClientCap(drm->fd, DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE, 1) == 0;
 
 	if (drmGetCap(drm->fd, DRM_CAP_CURSOR_WIDTH, &drm->cursor_width) != 0) {
 		drm->cursor_width = 64;
@@ -3446,11 +3447,29 @@ bool drm_supports_color_mgmt(struct drm_t *drm)
 	if ( g_bForceDisableColorMgmt )
 		return false;
 
+	if ( g_bSupportsColorPipeline )
+		return false;
+
 	if ( !drm->pPrimaryPlane )
 		return false;
 
 	return drm->pPrimaryPlane->GetProperties().AMD_PLANE_CTM.has_value() && drm->pPrimaryPlane->GetProperties().AMD_PLANE_BLEND_TF.has_value();
 }
+
+bool drm_supports_color_pipeline(struct drm_t *drm)
+{
+       if ( g_bForceDisableColorMgmt )
+               return false;
+
+       if ( !g_bSupportsColorPipeline )
+		return false;
+
+       if ( !drm->pPrimaryPlane )
+               return false;
+
+       return drm->pPrimaryPlane->GetProperties().COLOR_PIPELINE.has_value() ;
+}
+
 
 std::span<const uint32_t> drm_get_valid_refresh_rates( struct drm_t *drm )
 {
