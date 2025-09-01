@@ -1005,8 +1005,8 @@ static bool get_resources(struct drm_t *drm)
 	for ( std::unique_ptr< gamescope::CDRMPlane > &pPlane : drm->planes )
 	{
 		// AMD Cursor plane doesn't support color management
-		if ( pPlane->GetProperties().type->GetCurrentValue() != DRM_PLANE_TYPE_CURSOR && !get_plane_color_pipelines( drm, pPlane ) )
-			return false;
+		if ( pPlane->GetProperties().type->GetCurrentValue() != DRM_PLANE_TYPE_CURSOR )
+			get_plane_color_pipelines( drm, pPlane );
 	}
 
 	return refresh_state( drm );
