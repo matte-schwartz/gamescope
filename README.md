@@ -108,8 +108,8 @@ gamescope -w 1920 -h 1080 -W 3440 -H 1440 -b -- %command%
 From a desktop terminal, you can also run gamescope with programs other than Steam:
 
 ```sh
-# Run vkcube in gamescope
-gamescope -- vkcube
+# Run vkcube in gamescope, nested on a Wayland compositor (like kwin-wayland)
+gamescope -- vkcube --wsi xcb
 
 # Run glxgears in fullscreen 2160p, with a frame rate of 24 FPS
 gamescope -r 24 -w 3840 -h 2160 -- glxgears
