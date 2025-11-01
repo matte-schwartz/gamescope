@@ -2239,6 +2239,8 @@ namespace gamescope
 		bool bHasKnownColorimetry = false;
 		bool bHasKnownHDRInfo = false;
 
+		static bool bExposeInternalPanelPQ = env_to_bool(getenv("GAMESCOPE_EXPOSE_INTERNAL_PANEL_PQ"));
+
 		m_Mutable.ValidDynamicRefreshRates.clear();
 		m_Mutable.fnDynamicModeGenerator = nullptr;
 		{
@@ -2437,7 +2439,8 @@ namespace gamescope
 				 pHDRStaticMetadata && pHDRStaticMetadata->eotfs && pHDRStaticMetadata->eotfs->pq )
 			{
 				m_Mutable.HDR.bExposeHDRSupport = true;
-				m_Mutable.HDR.eOutputEncodingEOTF = EOTF_PQ;
+				// Steam doesn't handle brightness control properly for PQ yet :(
+				m_Mutable.HDR.eOutputEncodingEOTF = ( GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL && !bExposeInternalPanelPQ ) ? EOTF_Gamma22 : EOTF_PQ;
 				m_Mutable.HDR.uMaxContentLightLevel =
 					pHDRStaticMetadata->desired_content_max_luminance
 					? nits_to_u16( pHDRStaticMetadata->desired_content_max_luminance )
