@@ -2833,9 +2833,19 @@ paint_all( global_focus_t *pFocus, bool async )
 		else if ( path.extension() == ".nv12.bin" )
 			drmCaptureFormat = DRM_FORMAT_NV12;
 
+		// For BASE_PLANE_ONLY screenshots, use the game's internal render resolution
+		// so that supersampling is preserved.
+		uint32_t nScreenshotWidth = g_nOutputWidth;
+		uint32_t nScreenshotHeight = g_nOutputHeight;
+		if ( oScreenshotInfo->eScreenshotType == GAMESCOPE_CONTROL_SCREENSHOT_TYPE_BASE_PLANE_ONLY )
+		{
+			nScreenshotWidth = g_nNestedWidth;
+			nScreenshotHeight = g_nNestedHeight;
+		}
+
 		gamescope::Rc<CVulkanTexture> pScreenshotTexture;
 		if ( drmCaptureFormat != DRM_FORMAT_INVALID )
-			pScreenshotTexture = vulkan_acquire_screenshot_texture( g_nOutputWidth, g_nOutputHeight, false, drmCaptureFormat );
+			pScreenshotTexture = vulkan_acquire_screenshot_texture( nScreenshotWidth, nScreenshotHeight, false, drmCaptureFormat );
 
 		if ( pScreenshotTexture )
 		{
@@ -2902,7 +2912,36 @@ paint_all( global_focus_t *pFocus, bool async )
 					  oScreenshotInfo->eScreenshotType == GAMESCOPE_CONTROL_SCREENSHOT_TYPE_SCREEN_BUFFER )
 				oScreenshotSeq = vulkan_composite( &frameInfo, nullptr, false, pScreenshotTexture );
 			else
-				oScreenshotSeq = vulkan_screenshot( &frameInfo, pScreenshotTexture, nullptr );
+			{
+				// For BASE_PLANE_ONLY, repaint at internal resolution to preserve supersampling
+				global_focus_t *pFocus = GetCurrentFocus();
+				if ( pFocus && pFocus->focusWindow )
+				{
+					const uint32_t uBackupWidth = currentOutputWidth;
+					const uint32_t uBackupHeight = currentOutputHeight;
+					currentOutputWidth = nScreenshotWidth;
+					currentOutputHeight = nScreenshotHeight;
+
+					FrameInfo_t screenshotFrameInfo{};
+					paint_window( pFocus->focusWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
+					if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
+						paint_window( pFocus->overrideWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
+
+					screenshotFrameInfo.outputEncodingEOTF = bHDRScreenshot ? EOTF_PQ : EOTF_Gamma22;
+					screenshotFrameInfo.applyOutputColorMgmt = true;
+					for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
+					{
+						auto& luts = bHDRScreenshot ? g_ScreenshotColorMgmtLutsHDR : g_ScreenshotColorMgmtLuts;
+						screenshotFrameInfo.lut3D[nInputEOTF] = luts[nInputEOTF].vk_lut3d;
+						screenshotFrameInfo.shaperLut[nInputEOTF] = luts[nInputEOTF].vk_lut1d;
+					}
+
+					oScreenshotSeq = vulkan_screenshot( &screenshotFrameInfo, pScreenshotTexture, nullptr );
+
+					currentOutputWidth = uBackupWidth;
+					currentOutputHeight = uBackupHeight;
+				}
+			}
 
 			if ( oScreenshotInfo->eScreenshotType != GAMESCOPE_CONTROL_SCREENSHOT_TYPE_SCREEN_BUFFER )
 			{
@@ -2951,6 +2990,8 @@ paint_all( global_focus_t *pFocus, bool async )
 				pthread_setname_np( pthread_self(), "gamescope-scrsh" );
 
 				const uint8_t *mappedData = pScreenshotTexture->mappedData();
+				const uint32_t nWidth = pScreenshotTexture->width();
+				const uint32_t nHeight = pScreenshotTexture->height();
 
 				bool bScreenshotSuccess = false;
 
@@ -2958,18 +2999,18 @@ paint_all( global_focus_t *pFocus, bool async )
 				{
 					// Make our own copy of the image to remove the alpha channel.
 					constexpr uint32_t kCompCnt = 3;
-					auto imageData = std::vector<uint16_t>( g_nOutputWidth * g_nOutputHeight * kCompCnt );
+					auto imageData = std::vector<uint16_t>( nWidth * nHeight * kCompCnt );
 
-					for (uint32_t y = 0; y < g_nOutputHeight; y++)
+					for (uint32_t y = 0; y < nHeight; y++)
 					{
-						for (uint32_t x = 0; x < g_nOutputWidth; x++)
+						for (uint32_t x = 0; x < nWidth; x++)
 						{
 							uint32_t *pInPixel = (uint32_t *)&mappedData[(y * pScreenshotTexture->rowPitch()) + x * (32 / 8)];
 							uint32_t uInPixel = *pInPixel;
 
-							imageData[y * g_nOutputWidth * kCompCnt + x * kCompCnt + 0] = (uInPixel & (0b1111111111 << 20)) >> 20;
-							imageData[y * g_nOutputWidth * kCompCnt + x * kCompCnt + 1] = (uInPixel & (0b1111111111 << 10)) >> 10;
-							imageData[y * g_nOutputWidth * kCompCnt + x * kCompCnt + 2] = (uInPixel & (0b1111111111 << 0))  >> 0;
+							imageData[y * nWidth * kCompCnt + x * kCompCnt + 0] = (uInPixel & (0b1111111111 << 20)) >> 20;
+							imageData[y * nWidth * kCompCnt + x * kCompCnt + 1] = (uInPixel & (0b1111111111 << 10)) >> 10;
+							imageData[y * nWidth * kCompCnt + x * kCompCnt + 2] = (uInPixel & (0b1111111111 << 0))  >> 0;
 						}
 					}
 
@@ -2977,7 +3018,7 @@ paint_all( global_focus_t *pFocus, bool async )
 #if HAVE_AVIF
 					avifResult avifResult = AVIF_RESULT_OK;
 
-					avifImage *pAvifImage = avifImageCreate( g_nOutputWidth, g_nOutputHeight, 10, AVIF_PIXEL_FORMAT_YUV444 );
+					avifImage *pAvifImage = avifImageCreate( nWidth, nHeight, 10, AVIF_PIXEL_FORMAT_YUV444 );
 					defer( avifImageDestroy( pAvifImage ) );
 					pAvifImage->yuvRange = AVIF_RANGE_FULL;
 					pAvifImage->colorPrimaries = bHDRScreenshot ? AVIF_COLOR_PRIMARIES_BT2020 : AVIF_COLOR_PRIMARIES_BT709;
@@ -3007,7 +3048,7 @@ paint_all( global_focus_t *pFocus, bool async )
 					rgbAvifImage.ignoreAlpha = AVIF_TRUE;
 
 					rgbAvifImage.pixels = (uint8_t *)imageData.data();
-					rgbAvifImage.rowBytes = g_nOutputWidth * kCompCnt * sizeof( uint16_t );
+					rgbAvifImage.rowBytes = nWidth * kCompCnt * sizeof( uint16_t );
 
 					if ( ( avifResult = avifImageRGBToYUV( pAvifImage, &rgbAvifImage ) ) != AVIF_RESULT_OK ) // Not really! See Matrix Coefficients IDENTITY above.
 					{
