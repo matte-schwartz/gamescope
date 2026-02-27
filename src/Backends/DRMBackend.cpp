@@ -346,6 +346,7 @@ namespace gamescope
 			std::optional<CDRMAtomicProperty> DEGAMMA_LUT;
 			std::optional<CDRMAtomicProperty> CTM;
 			std::optional<CDRMAtomicProperty> VRR_ENABLED;
+			std::optional<CDRMAtomicProperty> LOW_LATENCY_FLIP;
 			std::optional<CDRMAtomicProperty> OUT_FENCE_PTR;
 			std::optional<CDRMAtomicProperty> AMD_CRTC_REGAMMA_TF;
 			std::optional<CDRMAtomicProperty> DUMMY_END;
@@ -2072,6 +2073,7 @@ namespace gamescope
 			m_Props.DEGAMMA_LUT         = CDRMAtomicProperty::Instantiate( "DEGAMMA_LUT",         this, *rawProperties );
 			m_Props.CTM                 = CDRMAtomicProperty::Instantiate( "CTM",                 this, *rawProperties );
 			m_Props.VRR_ENABLED         = CDRMAtomicProperty::Instantiate( "VRR_ENABLED",         this, *rawProperties );
+			m_Props.LOW_LATENCY_FLIP    = CDRMAtomicProperty::Instantiate( "LOW_LATENCY_FLIP",    this, *rawProperties );
 			m_Props.OUT_FENCE_PTR       = CDRMAtomicProperty::Instantiate( "OUT_FENCE_PTR",       this, *rawProperties );
 			m_Props.AMD_CRTC_REGAMMA_TF = CDRMAtomicProperty::Instantiate( "AMD_CRTC_REGAMMA_TF", this, *rawProperties );
 		}
@@ -2963,6 +2965,9 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 			if ( pCRTC->GetProperties().VRR_ENABLED )
 				pCRTC->GetProperties().VRR_ENABLED->SetPendingValue( drm->req, 0, bForceInRequest );
 
+			if ( pCRTC->GetProperties().LOW_LATENCY_FLIP )
+				pCRTC->GetProperties().LOW_LATENCY_FLIP->SetPendingValue( drm->req, 0, bForceInRequest );
+
 			if ( pCRTC->GetProperties().OUT_FENCE_PTR )
 				pCRTC->GetProperties().OUT_FENCE_PTR->SetPendingValue( drm->req, 0, bForceInRequest );
 
@@ -2987,6 +2992,9 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 
 			if ( drm->pCRTC->GetProperties().VRR_ENABLED )
 				drm->pCRTC->GetProperties().VRR_ENABLED->SetPendingValue( drm->req, bVRREnabled, true );
+
+			if ( drm->pCRTC->GetProperties().LOW_LATENCY_FLIP )
+				drm->pCRTC->GetProperties().LOW_LATENCY_FLIP->SetPendingValue( drm->req, 1, true );
 		}
 	}
 
