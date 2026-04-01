@@ -352,6 +352,12 @@ namespace gamescope
 			std::optional<CDRMAtomicProperty> VRR_ENABLED;
 			std::optional<CDRMAtomicProperty> OUT_FENCE_PTR;
 			std::optional<CDRMAtomicProperty> AMD_CRTC_REGAMMA_TF;
+			// NVIDIA vendor-specific CRTC regamma properties.
+			// Used because per-CRTC post-blending color pipeline isn't upstream yet.
+			std::optional<CDRMAtomicProperty> NV_CRTC_REGAMMA_TF;
+			std::optional<CDRMAtomicProperty> NV_CRTC_REGAMMA_LUT;
+			std::optional<CDRMAtomicProperty> NV_CRTC_REGAMMA_DIVISOR;
+			std::optional<CDRMAtomicProperty> NV_CRTC_REGAMMA_LUT_SIZE; // Immutable
 			std::optional<CDRMAtomicProperty> DUMMY_END;
 		};
 		      CRTCProperties &GetProperties()       { return m_Props; }
@@ -554,17 +560,45 @@ namespace gamescope
 		ColorOpProperties m_Props;
 	};
 
+	enum EDRMColorPipelineType
+	{
+		k_eDRMColorPipeline_Unknown,
+		k_eDRMColorPipeline_AMD,       // 8-stage: degamma, mult, CTM, shaper, shaperLut, 3DLUT, blend, blendLut
+		k_eDRMColorPipeline_NV_Full,   // 11-stage: fmtCTM, degamma, degammaLut, mult, lmsCTM, pqInvEOTF, lmsToItpCTM, tmoLut, itpToLmsCTM, pqEOTF, blendCTM
+		k_eDRMColorPipeline_NV_Lite,   // 5-stage:  fmtCTM, degamma, degammaLut, mult, blendCTM
+	};
+
 	struct CDRMColorPipeline
 	{
 		uint32_t id;
-		std::unique_ptr<gamescope::CDRMColorOp> degamma;
-		std::unique_ptr<gamescope::CDRMColorOp> HDRMult;
-		std::unique_ptr<gamescope::CDRMColorOp> CTM;
-		std::unique_ptr<gamescope::CDRMColorOp> shaper;
-		std::unique_ptr<gamescope::CDRMColorOp> shaperLut;
-		std::unique_ptr<gamescope::CDRMColorOp> lut3D;
-		std::unique_ptr<gamescope::CDRMColorOp> blend;
-		std::unique_ptr<gamescope::CDRMColorOp> blendLut;
+		std::string name;
+		EDRMColorPipelineType type = k_eDRMColorPipeline_Unknown;
+
+		// AMD pipeline stages
+		std::unique_ptr<gamescope::CDRMColorOp> degamma;    // 1D_CURVE (EOTF)
+		std::unique_ptr<gamescope::CDRMColorOp> HDRMult;    // MULTIPLIER
+		std::unique_ptr<gamescope::CDRMColorOp> CTM;        // CTM_3X4 (AMD gamut matrix)
+		std::unique_ptr<gamescope::CDRMColorOp> shaper;     // 1D_CURVE (shaper TF)
+		std::unique_ptr<gamescope::CDRMColorOp> shaperLut;  // 1D_LUT (shaper LUT)
+		std::unique_ptr<gamescope::CDRMColorOp> lut3D;      // 3D_LUT
+		std::unique_ptr<gamescope::CDRMColorOp> blend;      // 1D_CURVE (blend TF)
+		std::unique_ptr<gamescope::CDRMColorOp> blendLut;   // 1D_LUT (blend LUT)
+
+		// NVIDIA pipeline stages
+		std::unique_ptr<gamescope::CDRMColorOp> fmtCTM;     // CTM_3X4 (YUV→RGB, replaces COLOR_ENCODING/RANGE)
+		std::unique_ptr<gamescope::CDRMColorOp> degammaLut; // 1D_LUT (custom degamma LUT)
+		// NVIDIA ICtCp path (Full pipelines only)
+		std::unique_ptr<gamescope::CDRMColorOp> lmsCTM;        // CTM_3X4 (RGB→LMS)
+		std::unique_ptr<gamescope::CDRMColorOp> pqInvEOTF;     // 1D_CURVE (linear→PQ, non-bypassable)
+		std::unique_ptr<gamescope::CDRMColorOp> lmsToItpCTM;   // CTM_3X4 (LMS→ICtCp)
+		std::unique_ptr<gamescope::CDRMColorOp> tmoLut;        // 1D_LUT (tone mapping, R=G=B)
+		std::unique_ptr<gamescope::CDRMColorOp> itpToLmsCTM;   // CTM_3X4 (ICtCp→LMS)
+		std::unique_ptr<gamescope::CDRMColorOp> pqEOTF;        // 1D_CURVE (PQ→linear, non-bypassable)
+		std::unique_ptr<gamescope::CDRMColorOp> blendCTM;      // CTM_3X4 (final gamut conversion)
+
+		bool IsAMD() const { return type == k_eDRMColorPipeline_AMD; }
+		bool IsNVIDIA() const { return type == k_eDRMColorPipeline_NV_Full || type == k_eDRMColorPipeline_NV_Lite; }
+		bool IsNVIDIAFull() const { return type == k_eDRMColorPipeline_NV_Full; }
 	};
 
 	class CDRMFb final : public CBaseBackendFb
@@ -928,9 +962,145 @@ static bool refresh_state( drm_t *drm )
 	return true;
 }
 
-static std::optional<gamescope::CDRMColorPipeline> get_color_pipeline( struct drm_t *drm, uint32_t uHeadId )
+static uint32_t colorop_get_type( gamescope::CDRMColorOp *pOp )
 {
-	std::vector<std::unique_ptr<gamescope::CDRMColorOp>> pipeline;
+	return pOp->GetProperties().TYPE.value().GetInitialValue();
+}
+
+static bool match_colorop_types( const std::vector<std::unique_ptr<gamescope::CDRMColorOp>> &ops, std::initializer_list<uint32_t> expected )
+{
+	if ( ops.size() != expected.size() )
+		return false;
+
+	auto it = expected.begin();
+	for ( size_t i = 0; i < ops.size(); i++, ++it )
+	{
+		if ( colorop_get_type( ops[i].get() ) != *it )
+			return false;
+	}
+	return true;
+}
+
+// AMD pipeline: 8 stages
+// degamma(1D_CURVE) → HDRMult(MULT) → CTM(CTM_3X4) → shaper(1D_CURVE) → shaperLut(1D_LUT) → lut3D(3D_LUT) → blend(1D_CURVE) → blendLut(1D_LUT)
+static std::optional<gamescope::CDRMColorPipeline> try_match_amd_pipeline( uint32_t uHeadId, std::vector<std::unique_ptr<gamescope::CDRMColorOp>> &ops )
+{
+	if ( !match_colorop_types( ops, {
+		DRM_COLOROP_1D_CURVE, DRM_COLOROP_MULTIPLIER, DRM_COLOROP_CTM_3X4,
+		DRM_COLOROP_1D_CURVE, DRM_COLOROP_1D_LUT, DRM_COLOROP_3D_LUT,
+		DRM_COLOROP_1D_CURVE, DRM_COLOROP_1D_LUT } ) )
+		return {};
+
+	gamescope::CDRMColorPipeline p;
+	p.id       = uHeadId;
+	p.name     = "AMD";
+	p.type     = gamescope::k_eDRMColorPipeline_AMD;
+	p.degamma  = std::move(ops[0]);
+	p.HDRMult  = std::move(ops[1]);
+	p.CTM      = std::move(ops[2]);
+	p.shaper   = std::move(ops[3]);
+	p.shaperLut = std::move(ops[4]);
+	p.lut3D    = std::move(ops[5]);
+	p.blend    = std::move(ops[6]);
+	p.blendLut = std::move(ops[7]);
+	return p;
+}
+
+// NVIDIA Lite pipeline: 5 stages
+// fmtCTM(CTM_3X4) → degamma(1D_CURVE) → degammaLut(1D_LUT) → mult(MULT) → blendCTM(CTM_3X4)
+static std::optional<gamescope::CDRMColorPipeline> try_match_nv_lite_pipeline( uint32_t uHeadId, const std::string &name, std::vector<std::unique_ptr<gamescope::CDRMColorOp>> &ops )
+{
+	if ( !match_colorop_types( ops, {
+		DRM_COLOROP_CTM_3X4, DRM_COLOROP_1D_CURVE, DRM_COLOROP_1D_LUT,
+		DRM_COLOROP_MULTIPLIER, DRM_COLOROP_CTM_3X4 } ) )
+		return {};
+
+	gamescope::CDRMColorPipeline p;
+	p.id       = uHeadId;
+	p.name     = name;
+	p.type     = gamescope::k_eDRMColorPipeline_NV_Lite;
+	p.fmtCTM   = std::move(ops[0]);
+	p.degamma  = std::move(ops[1]);
+	p.degammaLut = std::move(ops[2]);
+	p.HDRMult  = std::move(ops[3]);
+	p.blendCTM = std::move(ops[4]);
+	return p;
+}
+
+// NVIDIA Full pipeline: 11 stages
+// fmtCTM(CTM) → degamma(1D_CURVE) → degammaLut(1D_LUT) → mult(MULT)
+// → lmsCTM(CTM) → pqInvEOTF(1D_CURVE) → lmsToItpCTM(CTM) → tmoLut(1D_LUT)
+// → itpToLmsCTM(CTM) → pqEOTF(1D_CURVE) → blendCTM(CTM)
+static std::optional<gamescope::CDRMColorPipeline> try_match_nv_full_pipeline( uint32_t uHeadId, const std::string &name, std::vector<std::unique_ptr<gamescope::CDRMColorOp>> &ops )
+{
+	if ( !match_colorop_types( ops, {
+		DRM_COLOROP_CTM_3X4, DRM_COLOROP_1D_CURVE, DRM_COLOROP_1D_LUT, DRM_COLOROP_MULTIPLIER,
+		DRM_COLOROP_CTM_3X4, DRM_COLOROP_1D_CURVE, DRM_COLOROP_CTM_3X4, DRM_COLOROP_1D_LUT,
+		DRM_COLOROP_CTM_3X4, DRM_COLOROP_1D_CURVE, DRM_COLOROP_CTM_3X4 } ) )
+		return {};
+
+	gamescope::CDRMColorPipeline p;
+	p.id          = uHeadId;
+	p.name        = name;
+	p.type        = gamescope::k_eDRMColorPipeline_NV_Full;
+	p.fmtCTM      = std::move(ops[0]);
+	p.degamma     = std::move(ops[1]);
+	p.degammaLut  = std::move(ops[2]);
+	p.HDRMult     = std::move(ops[3]);
+	p.lmsCTM      = std::move(ops[4]);
+	p.pqInvEOTF   = std::move(ops[5]);
+	p.lmsToItpCTM = std::move(ops[6]);
+	p.tmoLut      = std::move(ops[7]);
+	p.itpToLmsCTM = std::move(ops[8]);
+	p.pqEOTF      = std::move(ops[9]);
+	p.blendCTM    = std::move(ops[10]);
+	return p;
+}
+
+// NVIDIA FP Lite pipeline: 2 stages (no ILUT ops)
+// fmtCTM(CTM_3X4) → blendCTM(CTM_3X4)
+static std::optional<gamescope::CDRMColorPipeline> try_match_nv_fp_lite_pipeline( uint32_t uHeadId, const std::string &name, std::vector<std::unique_ptr<gamescope::CDRMColorOp>> &ops )
+{
+	if ( !match_colorop_types( ops, { DRM_COLOROP_CTM_3X4, DRM_COLOROP_CTM_3X4 } ) )
+		return {};
+
+	gamescope::CDRMColorPipeline p;
+	p.id       = uHeadId;
+	p.name     = name;
+	p.type     = gamescope::k_eDRMColorPipeline_NV_Lite;
+	p.fmtCTM   = std::move(ops[0]);
+	p.blendCTM = std::move(ops[1]);
+	return p;
+}
+
+// NVIDIA FP Full pipeline: 8 stages (no ILUT ops)
+// fmtCTM(CTM) → lmsCTM(CTM) → pqInvEOTF(1D_CURVE) → lmsToItpCTM(CTM) → tmoLut(1D_LUT)
+// → itpToLmsCTM(CTM) → pqEOTF(1D_CURVE) → blendCTM(CTM)
+static std::optional<gamescope::CDRMColorPipeline> try_match_nv_fp_full_pipeline( uint32_t uHeadId, const std::string &name, std::vector<std::unique_ptr<gamescope::CDRMColorOp>> &ops )
+{
+	if ( !match_colorop_types( ops, {
+		DRM_COLOROP_CTM_3X4, DRM_COLOROP_CTM_3X4, DRM_COLOROP_1D_CURVE, DRM_COLOROP_CTM_3X4,
+		DRM_COLOROP_1D_LUT, DRM_COLOROP_CTM_3X4, DRM_COLOROP_1D_CURVE, DRM_COLOROP_CTM_3X4 } ) )
+		return {};
+
+	gamescope::CDRMColorPipeline p;
+	p.id          = uHeadId;
+	p.name        = name;
+	p.type        = gamescope::k_eDRMColorPipeline_NV_Full;
+	p.fmtCTM      = std::move(ops[0]);
+	p.lmsCTM      = std::move(ops[1]);
+	p.pqInvEOTF   = std::move(ops[2]);
+	p.lmsToItpCTM = std::move(ops[3]);
+	p.tmoLut      = std::move(ops[4]);
+	p.itpToLmsCTM = std::move(ops[5]);
+	p.pqEOTF      = std::move(ops[6]);
+	p.blendCTM    = std::move(ops[7]);
+	return p;
+}
+
+static std::optional<gamescope::CDRMColorPipeline> get_color_pipeline( struct drm_t *drm, uint32_t uHeadId, const char *pszName )
+{
+	std::vector<std::unique_ptr<gamescope::CDRMColorOp>> ops;
 
 	uint32_t uColorOpId = uHeadId;
 	while ( uColorOpId != 0 )
@@ -938,41 +1108,56 @@ static std::optional<gamescope::CDRMColorPipeline> get_color_pipeline( struct dr
 		auto pColorOp = std::make_unique<gamescope::CDRMColorOp>( uColorOpId );
 		pColorOp->RefreshState();
 		uColorOpId = pColorOp->GetProperties().NEXT.value().GetInitialValue();
-		pipeline.emplace_back( std::move(pColorOp) );
+		ops.emplace_back( std::move(pColorOp) );
 	}
 
-	// Check if the pipeline has what we need
-	if ( pipeline.size() != 8 )
-		return {};
-	if ( pipeline[0]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_1D_CURVE )
-		return {};
-	if ( pipeline[1]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_MULTIPLIER )
-		return {};
-	if ( pipeline[2]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_CTM_3X4 )
-		return {};
-	if ( pipeline[3]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_1D_CURVE )
-		return {};
-	if ( pipeline[4]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_1D_LUT )
-		return {};
-	if ( pipeline[5]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_3D_LUT )
-		return {};
-	if ( pipeline[6]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_1D_CURVE )
-		return {};
-	if ( pipeline[7]->GetProperties().TYPE.value().GetInitialValue() != DRM_COLOROP_1D_LUT )
-		return {};
+	std::string name = pszName ? pszName : "";
 
-	gamescope::CDRMColorPipeline p {
-		.id = uHeadId,
-		.degamma = std::move(pipeline[0]),
-		.HDRMult = std::move(pipeline[1]),
-		.CTM = std::move(pipeline[2]),
-		.shaper = std::move(pipeline[3]),
-		.shaperLut = std::move(pipeline[4]),
-		.lut3D = std::move(pipeline[5]),
-		.blend = std::move(pipeline[6]),
-		.blendLut = std::move(pipeline[7]),
-	};
-	return p;
+	// Try AMD pipeline (8 stages)
+	if ( auto p = try_match_amd_pipeline( uHeadId, ops ) )
+		return p;
+
+	// Try NVIDIA pipelines by name first, fall back to topology matching.
+	// NVIDIA exposes 4 variants: "NVIDIA Full", "NVIDIA Lite", "NVIDIA FP Full", "NVIDIA FP Lite"
+	if ( name.find( "NVIDIA" ) != std::string::npos )
+	{
+		bool bFP = name.find( "FP" ) != std::string::npos;
+		bool bFull = name.find( "Full" ) != std::string::npos;
+
+		if ( bFull && !bFP )
+		{
+			if ( auto p = try_match_nv_full_pipeline( uHeadId, name, ops ) )
+				return p;
+		}
+		else if ( !bFull && !bFP )
+		{
+			if ( auto p = try_match_nv_lite_pipeline( uHeadId, name, ops ) )
+				return p;
+		}
+		else if ( bFull && bFP )
+		{
+			if ( auto p = try_match_nv_fp_full_pipeline( uHeadId, name, ops ) )
+				return p;
+		}
+		else // FP Lite
+		{
+			if ( auto p = try_match_nv_fp_lite_pipeline( uHeadId, name, ops ) )
+				return p;
+		}
+	}
+
+	// Generic topology match for NVIDIA if name matching didn't work
+	if ( auto p = try_match_nv_full_pipeline( uHeadId, name, ops ) )
+		return p;
+	if ( auto p = try_match_nv_lite_pipeline( uHeadId, name, ops ) )
+		return p;
+	if ( auto p = try_match_nv_fp_full_pipeline( uHeadId, name, ops ) )
+		return p;
+	if ( auto p = try_match_nv_fp_lite_pipeline( uHeadId, name, ops ) )
+		return p;
+
+	drm_log.debugf( "get_color_pipeline: unrecognized pipeline '%s' with %zu colorops", name.c_str(), ops.size() );
+	return {};
 }
 
 static std::optional<gamescope::CDRMColorPipeline> get_plane_color_pipelines( struct drm_t *drm, std::unique_ptr< gamescope::CDRMPlane > &pPlane )
@@ -990,9 +1175,12 @@ static std::optional<gamescope::CDRMColorPipeline> get_plane_color_pipelines( st
 	for ( int i = 0; i < pProperty->count_enums; i++ )
 	{
 		auto entry = pProperty->enums[ i ];
-		std::optional<gamescope::CDRMColorPipeline> p = get_color_pipeline( drm, entry.value );
+		std::optional<gamescope::CDRMColorPipeline> p = get_color_pipeline( drm, entry.value, entry.name );
 		if ( p.has_value() )
+		{
+			drm_log.debugf( "Found color pipeline '%s' (type %d) for plane %u", p->name.c_str(), (int)p->type, pPlane->GetObjectId() );
 			return p;
+		}
 	}
 
 	return {};
@@ -1611,6 +1799,15 @@ void finish_drm(struct drm_t *drm)
 
 		if ( pCRTC->GetProperties().AMD_CRTC_REGAMMA_TF )
 			pCRTC->GetProperties().AMD_CRTC_REGAMMA_TF->SetPendingValue( req, 0, true );
+
+		if ( pCRTC->GetProperties().NV_CRTC_REGAMMA_TF )
+			pCRTC->GetProperties().NV_CRTC_REGAMMA_TF->SetPendingValue( req, NV_DRM_TRANSFER_FUNCTION_DEFAULT, true );
+
+		if ( pCRTC->GetProperties().NV_CRTC_REGAMMA_LUT )
+			pCRTC->GetProperties().NV_CRTC_REGAMMA_LUT->SetPendingValue( req, 0, true );
+
+		if ( pCRTC->GetProperties().NV_CRTC_REGAMMA_DIVISOR )
+			pCRTC->GetProperties().NV_CRTC_REGAMMA_DIVISOR->SetPendingValue( req, 0x100000000ULL, true ); // 1.0 in S31.32
 	}
 
 	for ( std::unique_ptr< gamescope::CDRMPlane > &pPlane : drm->planes )
@@ -2032,6 +2229,23 @@ static inline std::optional<drm_colorop_curve_1d_type> amd_tf_to_drm_curve ( amd
 	}
 }
 
+// Convert internal output_tf to NVIDIA NV_CRTC_REGAMMA_TF value.
+// The regamma TF is the *inverse* EOTF applied to the output (i.e. for sRGB output
+// we apply sRGB inverse EOTF = sRGB OETF). The NV driver enum names these as the
+// inverse EOTF they apply.
+static inline nv_drm_transfer_function output_tf_to_nv_regamma( amdgpu_transfer_function tf )
+{
+	switch ( tf )
+	{
+		case AMDGPU_TRANSFER_FUNCTION_SRGB_EOTF:
+			return NV_DRM_TRANSFER_FUNCTION_SRGB;
+		case AMDGPU_TRANSFER_FUNCTION_PQ_EOTF:
+			return NV_DRM_TRANSFER_FUNCTION_PQ;
+		default:
+			return NV_DRM_TRANSFER_FUNCTION_DEFAULT;
+	}
+}
+
 static inline uint32_t ColorSpaceToEOTFIndex( GamescopeAppTextureColorspace colorspace )
 {
 	switch ( colorspace )
@@ -2274,6 +2488,10 @@ namespace gamescope
 			m_Props.VRR_ENABLED         = CDRMAtomicProperty::Instantiate( "VRR_ENABLED",         this, *rawProperties );
 			m_Props.OUT_FENCE_PTR       = CDRMAtomicProperty::Instantiate( "OUT_FENCE_PTR",       this, *rawProperties );
 			m_Props.AMD_CRTC_REGAMMA_TF = CDRMAtomicProperty::Instantiate( "AMD_CRTC_REGAMMA_TF", this, *rawProperties );
+			m_Props.NV_CRTC_REGAMMA_TF       = CDRMAtomicProperty::Instantiate( "NV_CRTC_REGAMMA_TF",       this, *rawProperties );
+			m_Props.NV_CRTC_REGAMMA_LUT      = CDRMAtomicProperty::Instantiate( "NV_CRTC_REGAMMA_LUT",      this, *rawProperties );
+			m_Props.NV_CRTC_REGAMMA_DIVISOR  = CDRMAtomicProperty::Instantiate( "NV_CRTC_REGAMMA_DIVISOR",  this, *rawProperties );
+			m_Props.NV_CRTC_REGAMMA_LUT_SIZE = CDRMAtomicProperty::Instantiate( "NV_CRTC_REGAMMA_LUT_SIZE", this, *rawProperties );
 		}
 	}
 
@@ -3020,76 +3238,178 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 				pPlane->GetProperties().COLOR_PIPELINE->SetPendingValue( drm->req, p->id, true );
 
 				GamescopeAppTextureColorspace colorspace = entry.layerState[i].colorspace;
-				std::optional<drm_colorop_curve_1d_type> degamma_tf = colorspace_to_drm_plane_degamma_curve( colorspace );
-				std::optional<drm_colorop_curve_1d_type> shaper_tf = colorspace_to_drm_plane_shaper_curve( colorspace );
 
-				if ( bYCbCr )
+				if ( p->IsAMD() )
 				{
-					degamma_tf = DRM_COLOROP_1D_CURVE_BT2020_INV_OETF;
-					shaper_tf = DRM_COLOROP_1D_CURVE_BT2020_OETF;
-				}
+					// =====================================================
+					// AMD pipeline: degamma → mult → CTM → shaper → shaperLut → 3DLUT → blend → blendLut
+					// =====================================================
+					std::optional<drm_colorop_curve_1d_type> degamma_tf = colorspace_to_drm_plane_degamma_curve( colorspace );
+					std::optional<drm_colorop_curve_1d_type> shaper_tf = colorspace_to_drm_plane_shaper_curve( colorspace );
 
-				bool bUseDegamma = !cv_drm_debug_disable_degamma_tf;
-				if ( bUseDegamma && degamma_tf.has_value() )
-				{
-					p->degamma->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
-					p->degamma->GetProperties().CURVE_1D_TYPE->SetPendingValue( drm->req, *degamma_tf, true );
-				}
-				else
-				{
-					p->degamma->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
-				}
+					if ( bYCbCr )
+					{
+						degamma_tf = DRM_COLOROP_1D_CURVE_BT2020_INV_OETF;
+						shaper_tf = DRM_COLOROP_1D_CURVE_BT2020_OETF;
+					}
 
-				bool bUseShaperAnd3DLUT = !cv_drm_debug_disable_shaper_and_3dlut;
-				if ( bUseShaperAnd3DLUT && shaper_tf.has_value() )
-				{
-					p->shaper->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
-					p->shaper->GetProperties().CURVE_1D_TYPE->SetPendingValue( drm->req, *shaper_tf, true );
-				}
-				else
-				{
-					p->shaper->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
-				}
+					bool bUseDegamma = !cv_drm_debug_disable_degamma_tf;
+					if ( bUseDegamma && degamma_tf.has_value() )
+					{
+						p->degamma->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+						p->degamma->GetProperties().CURVE_1D_TYPE->SetPendingValue( drm->req, *degamma_tf, true );
+					}
+					else
+					{
+						p->degamma->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					}
 
-				if ( bUseShaperAnd3DLUT )
-				{
-					p->shaperLut->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
-					p->shaperLut->GetProperties().DATA->SetPendingValue( drm->req, drm->pending.shaperlut_colorop_id[ ColorSpaceToEOTFIndex( colorspace ) ]->GetBlobValue(), true );
+					bool bUseShaperAnd3DLUT = !cv_drm_debug_disable_shaper_and_3dlut;
+					if ( bUseShaperAnd3DLUT && shaper_tf.has_value() )
+					{
+						p->shaper->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+						p->shaper->GetProperties().CURVE_1D_TYPE->SetPendingValue( drm->req, *shaper_tf, true );
+					}
+					else
+					{
+						p->shaper->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					}
 
-					p->lut3D->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
-					p->lut3D->GetProperties().DATA->SetPendingValue( drm->req, drm->pending.lut3d_colorop_id[ ColorSpaceToEOTFIndex( colorspace ) ]->GetBlobValue(), true );
-				}
-				else
-				{
-					p->shaperLut->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
-					p->lut3D->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
-				}
+					if ( bUseShaperAnd3DLUT )
+					{
+						p->shaperLut->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+						p->shaperLut->GetProperties().DATA->SetPendingValue( drm->req, drm->pending.shaperlut_colorop_id[ ColorSpaceToEOTFIndex( colorspace ) ]->GetBlobValue(), true );
 
-				std::optional<drm_colorop_curve_1d_type> blend_tf =  amd_tf_to_drm_curve(drm->pending.output_tf);
-				if (!cv_drm_debug_disable_blend_tf && !bSinglePlane && blend_tf.has_value() )
-				{
-					p->blend->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
-					p->blend->GetProperties().CURVE_1D_TYPE->SetPendingValue( drm->req, *blend_tf, true );
-				}
-				else
-				{
-					p->blend->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
-				}
+						p->lut3D->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+						p->lut3D->GetProperties().DATA->SetPendingValue( drm->req, drm->pending.lut3d_colorop_id[ ColorSpaceToEOTFIndex( colorspace ) ]->GetBlobValue(), true );
+					}
+					else
+					{
+						p->shaperLut->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+						p->lut3D->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					}
 
-				p->blendLut->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					std::optional<drm_colorop_curve_1d_type> blend_tf = amd_tf_to_drm_curve(drm->pending.output_tf);
+					if ( !cv_drm_debug_disable_blend_tf && !bSinglePlane && blend_tf.has_value() )
+					{
+						p->blend->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+						p->blend->GetProperties().CURVE_1D_TYPE->SetPendingValue( drm->req, *blend_tf, true );
+					}
+					else
+					{
+						p->blend->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					}
 
-				if ( frameInfo->layers[i].ctm != nullptr )
-				{
-					p->CTM->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
-					p->CTM->GetProperties().DATA->SetPendingValue( drm->req, frameInfo->layers[i].ctm->GetBlobValue(), true );
-				}
-				else
-				{
-					p->CTM->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
-				}
+					p->blendLut->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
 
-				p->HDRMult->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
-				p->HDRMult->GetProperties().MULTIPLIER->SetPendingValue( drm->req, 0x100000000ULL, true );
+					if ( frameInfo->layers[i].ctm != nullptr )
+					{
+						p->CTM->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+						p->CTM->GetProperties().DATA->SetPendingValue( drm->req, frameInfo->layers[i].ctm->GetBlobValue(), true );
+					}
+					else
+					{
+						p->CTM->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					}
+
+					p->HDRMult->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+					p->HDRMult->GetProperties().MULTIPLIER->SetPendingValue( drm->req, 0x100000000ULL, true );
+				}
+				else if ( p->IsNVIDIA() )
+				{
+					// =====================================================
+					// NVIDIA pipeline
+					// Lite:  fmtCTM → degamma → degammaLut → mult → blendCTM
+					// Full:  fmtCTM → degamma → degammaLut → mult → lmsCTM → pqInvEOTF → lmsToItpCTM → tmoLut → itpToLmsCTM → pqEOTF → blendCTM
+					// FP variants omit the ILUT stages (degamma, degammaLut, mult)
+					// =====================================================
+
+					// --- FMT_CTM: YUV→RGB conversion (replaces COLOR_ENCODING/COLOR_RANGE) ---
+					// When using COLOR_PIPELINE cap, the driver ignores COLOR_ENCODING/COLOR_RANGE.
+					// For YCbCr content we need to supply the matrix via FMT_CTM.
+					// For RGB content, bypass it.
+					if ( p->fmtCTM )
+					{
+						if ( bYCbCr && frameInfo->layers[i].ctm != nullptr )
+						{
+							// Use the layer's CTM for YCbCr→RGB if one is provided.
+							p->fmtCTM->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+							p->fmtCTM->GetProperties().DATA->SetPendingValue( drm->req, frameInfo->layers[i].ctm->GetBlobValue(), true );
+						}
+						else
+						{
+							p->fmtCTM->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+						}
+					}
+
+					// --- DEGAMMA: Linearize input ---
+					// PQ_125_EOTF maps 10,000 nits → 125.0. The NVIDIA driver internally
+					// uses PQ mapping to 1.0, so it applies an implicit ×125 to the multiplier.
+					// We account for this by using PQ_125_EOTF which is the standard DRM curve.
+					if ( p->degamma )
+					{
+						std::optional<drm_colorop_curve_1d_type> degamma_tf = colorspace_to_drm_plane_degamma_curve( colorspace );
+
+						bool bUseDegamma = !cv_drm_debug_disable_degamma_tf;
+						if ( bUseDegamma && degamma_tf.has_value() )
+						{
+							p->degamma->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+							p->degamma->GetProperties().CURVE_1D_TYPE->SetPendingValue( drm->req, *degamma_tf, true );
+						}
+						else
+						{
+							p->degamma->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+						}
+					}
+
+					// --- DEGAMMA_LUT: Custom degamma LUT (bypass for now) ---
+					if ( p->degammaLut )
+					{
+						p->degammaLut->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					}
+
+					// --- HDR Multiplier ---
+					if ( p->HDRMult )
+					{
+						p->HDRMult->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+						// Set to 1.0 in S31.32 sign-magnitude. The NVIDIA driver handles
+						// the PQ 125x scaling internally via the implicit multiplier when
+						// PQ_125_EOTF is active.
+						p->HDRMult->GetProperties().MULTIPLIER->SetPendingValue( drm->req, 0x100000000ULL, true );
+					}
+
+					// --- ICtCp TMO path (Full pipeline only) ---
+					// For now, bypass the ICtCp stages. The Full pipeline has non-bypassable
+					// PQ_INV_EOTF and PQ_EOTF stages — those are handled by the driver when
+					// the surrounding CTMs are set to identity. We bypass all the optional
+					// stages and let the non-bypassable ones pass through as identity transforms.
+					if ( p->lmsCTM )
+						p->lmsCTM->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					if ( p->lmsToItpCTM )
+						p->lmsToItpCTM->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					if ( p->tmoLut )
+						p->tmoLut->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					if ( p->itpToLmsCTM )
+						p->itpToLmsCTM->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+					// pqInvEOTF and pqEOTF are non-bypassable — they have no BYPASS property.
+					// When surrounded by bypassed CTMs, they form an identity (PQ→linear→PQ cancels out).
+
+					// --- BLEND_CTM: Gamut conversion matrix ---
+					// This is where gamut conversion happens on NVIDIA. For non-YCbCr content
+					// with a CTM, apply it here. Otherwise bypass.
+					if ( p->blendCTM )
+					{
+						if ( !bYCbCr && frameInfo->layers[i].ctm != nullptr )
+						{
+							p->blendCTM->GetProperties().BYPASS->SetPendingValue( drm->req, 0, true );
+							p->blendCTM->GetProperties().DATA->SetPendingValue( drm->req, frameInfo->layers[i].ctm->GetBlobValue(), true );
+						}
+						else
+						{
+							p->blendCTM->GetProperties().BYPASS->SetPendingValue( drm->req, 1, true );
+						}
+					}
+				}
 
 				break;
 			}
@@ -3306,6 +3626,15 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 
 			if ( pCRTC->GetProperties().AMD_CRTC_REGAMMA_TF )
 				pCRTC->GetProperties().AMD_CRTC_REGAMMA_TF->SetPendingValue( drm->req, 0, bForceInRequest );
+
+			if ( pCRTC->GetProperties().NV_CRTC_REGAMMA_TF )
+				pCRTC->GetProperties().NV_CRTC_REGAMMA_TF->SetPendingValue( drm->req, NV_DRM_TRANSFER_FUNCTION_DEFAULT, bForceInRequest );
+
+			if ( pCRTC->GetProperties().NV_CRTC_REGAMMA_LUT )
+				pCRTC->GetProperties().NV_CRTC_REGAMMA_LUT->SetPendingValue( drm->req, 0, bForceInRequest );
+
+			if ( pCRTC->GetProperties().NV_CRTC_REGAMMA_DIVISOR )
+				pCRTC->GetProperties().NV_CRTC_REGAMMA_DIVISOR->SetPendingValue( drm->req, 0x100000000ULL, bForceInRequest ); // 1.0 in S31.32
 		}
 
 		if ( drm->pConnector && !bSleep )
@@ -3352,6 +3681,36 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 				drm->pCRTC->GetProperties().AMD_CRTC_REGAMMA_TF->SetPendingValue( drm->req, inverse_tf( drm->pending.output_tf ), bForceInRequest );
 			else
 				drm->pCRTC->GetProperties().AMD_CRTC_REGAMMA_TF->SetPendingValue( drm->req, AMDGPU_TRANSFER_FUNCTION_DEFAULT, bForceInRequest );
+		}
+
+		// NVIDIA CRTC regamma — vendor-specific post-blending color management.
+		// Until per-CRTC color pipelines are upstream, NVIDIA uses these properties
+		// for output transfer function (regamma) and HDR gain renormalization.
+		if ( drm->pCRTC->GetProperties().NV_CRTC_REGAMMA_TF )
+		{
+			if ( !cv_drm_debug_disable_regamma_tf )
+			{
+				nv_drm_transfer_function nv_tf = output_tf_to_nv_regamma( drm->pending.output_tf );
+				drm->pCRTC->GetProperties().NV_CRTC_REGAMMA_TF->SetPendingValue( drm->req, nv_tf, bForceInRequest );
+			}
+			else
+			{
+				drm->pCRTC->GetProperties().NV_CRTC_REGAMMA_TF->SetPendingValue( drm->req, NV_DRM_TRANSFER_FUNCTION_DEFAULT, bForceInRequest );
+			}
+		}
+
+		if ( drm->pCRTC->GetProperties().NV_CRTC_REGAMMA_DIVISOR )
+		{
+			// The regamma divisor renormalizes the HDR multiplier gain back to 1.0 for output.
+			// For now we always set it to 1.0 (identity) since we don't adjust HDR gain above 1.0
+			// in the plane multiplier. When HDR gain is used, this should be set to match.
+			drm->pCRTC->GetProperties().NV_CRTC_REGAMMA_DIVISOR->SetPendingValue( drm->req, 0x100000000ULL, bForceInRequest );
+		}
+
+		if ( drm->pCRTC->GetProperties().NV_CRTC_REGAMMA_LUT )
+		{
+			// No custom regamma LUT for now — use the named TF instead.
+			drm->pCRTC->GetProperties().NV_CRTC_REGAMMA_LUT->SetPendingValue( drm->req, 0, bForceInRequest );
 		}
 	}
 

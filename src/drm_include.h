@@ -98,3 +98,13 @@ enum drm_colorop_curve_1d_type {
 	DRM_COLOROP_1D_CURVE_GAMMA22_INV,
 	DRM_COLOROP_1D_CURVE_COUNT
 };
+
+// NVIDIA vendor-specific CRTC regamma transfer functions.
+// These match the NV_DRM_TRANSFER_FUNCTION enum values exposed by the
+// NVIDIA driver through the NV_CRTC_REGAMMA_TF property.
+enum nv_drm_transfer_function {
+	NV_DRM_TRANSFER_FUNCTION_DEFAULT = 0,
+	NV_DRM_TRANSFER_FUNCTION_LINEAR,
+	NV_DRM_TRANSFER_FUNCTION_PQ,
+	NV_DRM_TRANSFER_FUNCTION_SRGB,
+};
