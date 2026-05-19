@@ -29,7 +29,7 @@
     it.
   </description>
 
-  <interface name="gamescope_control" version="6">
+  <interface name="gamescope_control" version="7">
     <request name="destroy" type="destructor"></request>
 
     <enum name="feature">
@@ -44,6 +44,7 @@
       <entry name="mura_correction" value="5"/>
       <entry name="look" value="6"/>
       <entry name="perf_query" value="7"/>
+      <entry name="display_selection" value="8"/>
     </enum>
 
     <event name="feature_support">
@@ -142,6 +143,39 @@
       <arg name="frametime_ns_lo" type="uint" summary="Time delta between the two most recent frames"></arg>
       <arg name="frametime_ns_hi" type="uint" summary="frametime_ns high bits"></arg>
     </event>
+
+    <event name="available_display_info" since="7">
+      <description summary="reports one available output the compositor could switch to.
+
+        Emitted once per currently-connected output on bind, and re-emitted in
+        full whenever the set of connected outputs changes. Clients should
+        rebuild their list each time, terminated by 'available_display_info_done'.
+
+        Backends without selectable outputs (SDL, Wayland, OpenVR, headless)
+        emit no events and only send 'available_display_info_done'."></description>
+      <arg name="connector_name" type="string" summary="kernel connector name, e.g. 'DP-1'. Stable identifier; pass back via set_preferred_connector"/>
+      <arg name="display_make" type="string"/>
+      <arg name="display_model" type="string"/>
+      <arg name="display_flags" type="uint" enum="display_flag" summary="combination of 'display_flag' values"/>
+    </event>
+
+    <event name="available_display_info_done" since="7">
+      <description summary="terminator for an available_display_info batch"></description>
+    </event>
+
+    <request name="set_preferred_connector" since="7">
+      <description summary="ask the compositor to switch to a specific output.
+
+        connector_name must match a name previously reported via
+        available_display_info. Pass an empty string to clear the runtime
+        override and fall back to the --prefer-output priority list.
+
+        The switch is asynchronous; observe 'active_display_info' for the new
+        active output. If the preferred connector later disconnects, the
+        compositor automatically falls back to the next available output
+        without clearing the override - replugging restores it."></description>
+      <arg name="connector_name" type="string" summary="connector to make preferred, or empty string to clear"/>
+    </request>
 
   </interface>
 </protocol>

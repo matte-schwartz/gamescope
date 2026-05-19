@@ -33,6 +33,14 @@ namespace gamescope
         std::vector<uint32_t> ValidRefreshRates;
     };
 
+    struct GamescopeAvailableDisplayInfo
+    {
+        std::string szConnectorName;
+        std::string szDisplayMake;
+        std::string szDisplayModel;
+        uint32_t uDisplayFlags;
+    };
+
     class GamescopeCtl
     {
     public:
@@ -41,9 +49,11 @@ namespace gamescope
 
         bool Init( bool bInitControl, bool bInitPrivate );
         bool Execute( std::span<std::string_view> args );
+        void SetPreferredConnector( const char *pszName );
 
         std::span<GamescopeFeature> GetFeatures() { return std::span<GamescopeFeature>{ m_Features }; }
         const std::optional<GamescopeActiveDisplayInfo> &GetActiveDisplayInfo() { return m_ActiveDisplayInfo; }
+        std::span<const GamescopeAvailableDisplayInfo> GetAvailableDisplays() { return m_AvailableDisplays; }
     private:
         bool m_bInitControl = false;
         bool m_bInitPrivate = false;
@@ -56,6 +66,8 @@ namespace gamescope
 
         std::vector<GamescopeFeature> m_Features;
         std::optional<GamescopeActiveDisplayInfo> m_ActiveDisplayInfo;
+        std::vector<GamescopeAvailableDisplayInfo> m_AvailableDisplays;
+        std::vector<GamescopeAvailableDisplayInfo> m_PendingAvailableDisplays;
 
         void Wayland_Registry_Global( wl_registry *pRegistry, uint32_t uName, const char *pInterface, uint32_t uVersion );
         static const wl_registry_listener s_RegistryListener;
@@ -63,6 +75,8 @@ namespace gamescope
         void Wayland_GamescopeControl_FeatureSupport( gamescope_control *pGamescopeControl, uint32_t uFeature, uint32_t uVersion, uint32_t uFlags );
         void Wayland_GamescopeControl_ActiveDisplayInfo( gamescope_control *pGamescopeControl, const char *pConnectorName, const char *pDisplayMake, const char *pDisplayModel, uint32_t uDisplayFlags, wl_array *pValidRefreshRatesArray );
         void Wayland_GamescopeControl_ScreenshotTaken( gamescope_control *pGamescopeControl, const char *pPath );
+        void Wayland_GamescopeControl_AvailableDisplayInfo( gamescope_control *pGamescopeControl, const char *pConnectorName, const char *pDisplayMake, const char *pDisplayModel, uint32_t uDisplayFlags );
+        void Wayland_GamescopeControl_AvailableDisplayInfoDone( gamescope_control *pGamescopeControl );
         static const gamescope_control_listener s_GamescopeControlListener;
 
         void Wayland_GamescopePrivate_Log( gamescope_private *pGamescopePrivate, const char *pText );
@@ -134,6 +148,14 @@ namespace gamescope
         return true;
     }
 
+    void GamescopeCtl::SetPreferredConnector( const char *pszName )
+    {
+        gamescope_control_set_preferred_connector( m_pGamescopeControl, pszName );
+        // Roundtrip so the request reaches the server; the actual switch is
+        // asynchronous - rerun 'gamescopectl' to observe the new active output.
+        wl_display_roundtrip( m_pDisplay );
+    }
+
     void GamescopeCtl::Wayland_Registry_Global( wl_registry *pRegistry, uint32_t uName, const char *pInterface, uint32_t uVersion )
     {
         if ( m_bInitControl && !strcmp( pInterface, gamescope_control_interface.name ) )
@@ -186,12 +208,30 @@ namespace gamescope
     {
         fprintf( stderr, "Screenshot taken to: %s\n", pPath );
     }
+    void GamescopeCtl::Wayland_GamescopeControl_AvailableDisplayInfo( gamescope_control *pGamescopeControl, const char *pConnectorName, const char *pDisplayMake, const char *pDisplayModel, uint32_t uDisplayFlags )
+    {
+        m_PendingAvailableDisplays.emplace_back( GamescopeAvailableDisplayInfo
+        {
+            .szConnectorName = pConnectorName,
+            .szDisplayMake   = pDisplayMake,
+            .szDisplayModel  = pDisplayModel,
+            .uDisplayFlags   = uDisplayFlags,
+        } );
+    }
+    void GamescopeCtl::Wayland_GamescopeControl_AvailableDisplayInfoDone( gamescope_control *pGamescopeControl )
+    {
+        m_AvailableDisplays = std::move( m_PendingAvailableDisplays );
+        m_PendingAvailableDisplays.clear();
+    }
 
     const gamescope_control_listener GamescopeCtl::s_GamescopeControlListener =
     {
-        .feature_support     = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_FeatureSupport ),
-        .active_display_info = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_ActiveDisplayInfo ),
-        .screenshot_taken    = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_ScreenshotTaken ),
+        .feature_support                = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_FeatureSupport ),
+        .active_display_info            = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_ActiveDisplayInfo ),
+        .screenshot_taken               = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_ScreenshotTaken ),
+        .app_performance_stats          = WAYLAND_NULL(),
+        .available_display_info         = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_AvailableDisplayInfo ),
+        .available_display_info_done    = WAYLAND_USERDATA_TO_THIS( GamescopeCtl, Wayland_GamescopeControl_AvailableDisplayInfoDone ),
     };
 
     void GamescopeCtl::Wayland_GamescopePrivate_Log( gamescope_private *pGamescopePrivate, const char *pText )
@@ -226,6 +266,12 @@ namespace gamescope
                 return "Refresh Cycle Only Change Refresh Rate";
             case GAMESCOPE_CONTROL_FEATURE_MURA_CORRECTION:
                 return "Mura Correction";
+            case GAMESCOPE_CONTROL_FEATURE_LOOK:
+                return "Look";
+            case GAMESCOPE_CONTROL_FEATURE_PERF_QUERY:
+                return "Performance Query";
+            case GAMESCOPE_CONTROL_FEATURE_DISPLAY_SELECTION:
+                return "Display Selection";
             default:
                 return "Unknown";
         }
@@ -236,10 +282,27 @@ namespace gamescope
         console_log.bPrefixEnabled = false;
 
         bool bInfoOnly = argc < 2;
+        // Built-in subcommands handled directly via gamescope_control rather
+        // than forwarded as convar commands through gamescope_private.
+        bool bSetPreferredConnector = argc >= 2 && !strcmp( argv[1], "set-preferred-connector" );
+        bool bUseControl = bInfoOnly || bSetPreferredConnector;
+        bool bUsePrivate = !bInfoOnly && !bSetPreferredConnector;
 
         gamescope::GamescopeCtl gamescopeCtl;
-        if ( !gamescopeCtl.Init( bInfoOnly, !bInfoOnly ) )
+        if ( !gamescopeCtl.Init( bUseControl, bUsePrivate ) )
             return 1;
+
+        if ( bSetPreferredConnector )
+        {
+            if ( argc < 3 )
+            {
+                fprintf( stderr, "usage: gamescopectl set-preferred-connector <connector-name|\"\">\n" );
+                fprintf( stderr, "  Pass an empty string to clear the runtime override.\n" );
+                return 1;
+            }
+            gamescopeCtl.SetPreferredConnector( argv[2] );
+            return 0;
+        }
 
         if ( bInfoOnly )
         {
@@ -260,6 +323,19 @@ namespace gamescope
                     fprintf( stdout, bLast ? "%u" : "%u, ", uRate );
                 }
                 fprintf( stdout, "\n" );
+            }
+            auto availableDisplays = gamescopeCtl.GetAvailableDisplays();
+            if ( !availableDisplays.empty() )
+            {
+                fprintf( stdout, "  Available Displays:\n" );
+                for ( const GamescopeAvailableDisplayInfo &avail : availableDisplays )
+                {
+                    fprintf( stdout, "  - %s", avail.szConnectorName.c_str() );
+                    if ( !avail.szDisplayMake.empty() || !avail.szDisplayModel.empty() )
+                        fprintf( stdout, " (%s %s)", avail.szDisplayMake.c_str(), avail.szDisplayModel.c_str() );
+                    fprintf( stdout, " - Flags: 0x%x\n", avail.uDisplayFlags );
+                }
+                fprintf( stdout, "  To switch: gamescopectl set-preferred-connector <connector-name>\n" );
             }
             fprintf( stdout, "  Features:\n" );
             for ( const GamescopeFeature &feature : gamescopeCtl.GetFeatures() )

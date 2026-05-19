@@ -157,6 +157,11 @@ struct drm_t {
 	std::atomic < bool > needs_modeset = { false };
 
 	std::unordered_map< std::string, int > connector_priorities;
+	// Runtime override from gamescope_control::set_preferred_connector.
+	// Takes priority over connector_priorities when the named connector is
+	// currently connected; ignored otherwise, so a disconnect falls through
+	// to the commandline priority list.
+	std::string preferred_override;
 
 	char *device_name = nullptr;
 };
@@ -987,6 +992,9 @@ static std::unordered_map<std::string, int> parse_connector_priorities(const cha
 
 static int get_connector_priority(struct drm_t *drm, const char *name)
 {
+	if (!drm->preferred_override.empty() && drm->preferred_override == name) {
+		return INT_MIN;
+	}
 	if (drm->connector_priorities.count(name) > 0) {
 		return drm->connector_priorities[name];
 	}
@@ -1430,6 +1438,34 @@ void drm_sleep_screen( gamescope::GamescopeScreenType eType, bool bSleep )
 		return;
 
 	cv_drm_sleep_screens[ eType ] = bSleep;
+}
+
+void drm_set_preferred_connector( const char *pszName )
+{
+	g_DRM.preferred_override = pszName ? pszName : "";
+
+	// Force a re-selection via the existing hotplug path. drm_poll_state()
+	// treats out_of_date >= 2 as "force re-evaluate even if the best
+	// connector is unchanged".
+	g_DRM.out_of_date.store( 2 );
+}
+
+void drm_enumerate_connectors( const std::function<void(const char *pszName, const char *pszMake, const char *pszModel, bool bInternal, bool bSupportsHDR, bool bSupportsVRR)> &fnCb )
+{
+	for ( auto &iter : g_DRM.connectors )
+	{
+		gamescope::CDRMConnector *pConn = &iter.second;
+		if ( pConn->GetModeConnector()->connection != DRM_MODE_CONNECTED )
+			continue;
+
+		fnCb(
+			pConn->GetName()  ? pConn->GetName()  : "",
+			pConn->GetMake()  ? pConn->GetMake()  : "",
+			pConn->GetModel() ? pConn->GetModel() : "",
+			pConn->GetScreenType() == gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL,
+			pConn->GetHDRInfo().bExposeHDRSupport,
+			pConn->SupportsVRR() );
+	}
 }
 
 

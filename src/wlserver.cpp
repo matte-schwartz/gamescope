@@ -11,6 +11,8 @@
 #include <xf86drm.h>
 #include <sys/eventfd.h>
 
+#include <functional>
+
 #include <linux/input-event-codes.h>
 
 #include <X11/extensions/XTest.h>
@@ -1091,6 +1093,8 @@ static void gamescope_control_take_screenshot( struct wl_client *client, struct 
 }
 
 void drm_sleep_screen( gamescope::GamescopeScreenType eType, bool bSleep );
+void drm_set_preferred_connector( const char *pszName );
+void drm_enumerate_connectors( const std::function<void(const char *pszName, const char *pszMake, const char *pszModel, bool bInternal, bool bSupportsHDR, bool bSupportsVRR)> &fnCb );
 
 static void gamescope_control_display_sleep( struct wl_client *client, struct wl_resource *resource, uint32_t display_type_flags, uint32_t flags )
 {
@@ -1103,6 +1107,11 @@ static void gamescope_control_display_sleep( struct wl_client *client, struct wl
 		if ( display_type_flags & GAMESCOPE_CONTROL_DISPLAY_TYPE_FLAGS_INTERNAL_DISPLAY )
 			drm_sleep_screen( gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL, sleep );
 	}
+}
+
+static void gamescope_control_set_preferred_connector( struct wl_client *client, struct wl_resource *resource, const char *connector_name )
+{
+	drm_set_preferred_connector( connector_name );
 }
 
 extern gamescope::ConVar<bool> cv_overlay_unmultiplied_alpha;
@@ -1258,6 +1267,7 @@ static const struct gamescope_control_interface gamescope_control_impl = {
 	.set_look = gamescope_control_set_look,
 	.unset_look = gamescope_control_unset_look,
 	.request_app_performance_stats = gamescope_control_request_app_performance_stats,
+	.set_preferred_connector = gamescope_control_set_preferred_connector,
 };
 
 static uint32_t get_conn_display_info_flags()
@@ -1305,6 +1315,21 @@ void wlserver_send_gamescope_control( wl_resource *control )
 	}
 	gamescope_control_send_active_display_info( control, pConn->GetName(), pConn->GetMake(), pConn->GetModel(), flags, &display_rates );
 	wl_array_release(&display_rates);
+
+	if ( wl_resource_get_version( control ) >= GAMESCOPE_CONTROL_AVAILABLE_DISPLAY_INFO_SINCE_VERSION )
+	{
+		drm_enumerate_connectors(
+			[ control ]( const char *pszName, const char *pszMake, const char *pszModel, bool bInternal, bool bSupportsHDR, bool bSupportsVRR )
+			{
+				uint32_t avail_flags = 0;
+				if ( bInternal )    avail_flags |= GAMESCOPE_CONTROL_DISPLAY_FLAG_INTERNAL_DISPLAY;
+				if ( bSupportsHDR ) avail_flags |= GAMESCOPE_CONTROL_DISPLAY_FLAG_SUPPORTS_HDR;
+				if ( bSupportsVRR ) avail_flags |= GAMESCOPE_CONTROL_DISPLAY_FLAG_SUPPORTS_VRR;
+
+				gamescope_control_send_available_display_info( control, pszName, pszMake, pszModel, avail_flags );
+			} );
+		gamescope_control_send_available_display_info_done( control );
+	}
 }
 
 static void gamescope_control_bind( struct wl_client *client, void *data, uint32_t version, uint32_t id )
@@ -1328,6 +1353,7 @@ static void gamescope_control_bind( struct wl_client *client, void *data, uint32
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_MURA_CORRECTION, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_LOOK, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_PERF_QUERY, 1, 0 );
+	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_DISPLAY_SELECTION, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_DONE, 0, 0 );
 
 	wlserver_send_gamescope_control( resource );
@@ -1337,7 +1363,7 @@ static void gamescope_control_bind( struct wl_client *client, void *data, uint32
 
 static void create_gamescope_control( void )
 {
-	uint32_t version = 6;
+	uint32_t version = 7;
 	wl_global_create( wlserver.display, &gamescope_control_interface, version, NULL, gamescope_control_bind );
 }
 
