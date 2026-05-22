@@ -5866,6 +5866,8 @@ static inline float santitize_float( float f )
 #endif
 }
 
+void drm_set_preferred_display_identifier( const char *pszIdentifier );
+
 static void
 handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 {
@@ -6317,6 +6319,11 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	{
 		GetBackend()->DirtyState( true );
 		XDeleteProperty( ctx->dpy, ctx->root, ctx->atoms.gamescopeDisplayModeNudge );
+	}
+	if ( ev->atom == ctx->atoms.gamescopeDisplayPreferredIdentifier )
+	{
+		std::string identifier = get_string_prop( ctx, ctx->root, ctx->atoms.gamescopeDisplayPreferredIdentifier );
+		drm_set_preferred_display_identifier( identifier.c_str() );
 	}
 	if ( ev->atom == ctx->atoms.gamescopeNewScalingFilter )
 	{
@@ -7853,9 +7860,11 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
 
 	ctx->atoms.gamescopeDisplayForceInternal = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_FORCE_INTERNAL", false );
 	ctx->atoms.gamescopeDisplayModeNudge = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_MODE_NUDGE", false );
+	ctx->atoms.gamescopeDisplayPreferredIdentifier = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_PREFERRED_IDENTIFIER", false );
 
 	ctx->atoms.gamescopeDisplayIsExternal = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_IS_EXTERNAL", false );
 	ctx->atoms.gamescopeDisplayModeListExternal = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_MODE_LIST_EXTERNAL", false );
+	ctx->atoms.gamescopeDisplayAvailableList = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_AVAILABLE_LIST", false );
 
 	ctx->atoms.gamescopeCursorVisibleFeedback = XInternAtom( ctx->dpy, "GAMESCOPE_CURSOR_VISIBLE_FEEDBACK", false );
 
@@ -8061,6 +8070,28 @@ void update_vrr_atoms(xwayland_ctx_t *root_ctx, bool force, bool* needs_flush = 
 		if (needs_flush)
 			*needs_flush = true;
 	}
+}
+
+std::vector< gamescope::GamescopeKnownDisplay > drm_get_connected_outputs();
+
+void update_available_displays_atom(xwayland_ctx_t *root_ctx, bool* needs_flush = nullptr)
+{
+	if (needs_flush)
+		*needs_flush = true;
+
+	// One display per line: identifier|connector_name|flags_hex|make|model
+	std::string out;
+	for ( const auto &display : drm_get_connected_outputs() )
+	{
+		char line[512];
+		snprintf( line, sizeof( line ), "%s|%s|0x%x|%s|%s\n",
+			display.szIdentifier.c_str(), display.szConnectorName.c_str(),
+			display.uFlags, display.szMake.c_str(), display.szModel.c_str() );
+		out += line;
+	}
+
+	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeDisplayAvailableList, XA_STRING, 8, PropModeReplace,
+		(unsigned char *)out.c_str(), out.size() + 1 );
 }
 
 void update_mode_atoms(xwayland_ctx_t *root_ctx, bool* needs_flush = nullptr)
@@ -8449,6 +8480,7 @@ steamcompmgr_main(int argc, char **argv)
 
 	update_vrr_atoms(root_ctx, true);
 	update_mode_atoms(root_ctx);
+	update_available_displays_atom(root_ctx);
 	XFlush(root_ctx->dpy);
 
 	if ( !GetBackend()->PostInit() )
@@ -8689,6 +8721,7 @@ steamcompmgr_main(int argc, char **argv)
 			hasRepaint = true;
 
 			update_mode_atoms(root_ctx, &flush_root);
+			update_available_displays_atom(root_ctx, &flush_root);
 		}
 
 		g_uCompositeDebug = cv_composite_debug;
