@@ -33,6 +33,15 @@ namespace gamescope
 
     extern ConVar<std::string> cv_backend;
 
+    struct GamescopeKnownDisplay
+    {
+        std::string szConnectorName;
+        std::string szMake;
+        std::string szModel;
+        std::string szIdentifier;
+        uint32_t uFlags = 0;
+    };
+
     namespace VirtualConnectorStrategies
     {
         enum VirtualConnectorStrategy : uint32_t

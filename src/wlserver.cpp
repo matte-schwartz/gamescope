@@ -1091,6 +1091,8 @@ static void gamescope_control_take_screenshot( struct wl_client *client, struct 
 }
 
 void drm_sleep_screen( gamescope::GamescopeScreenType eType, bool bSleep );
+void drm_set_preferred_connector( const char *pszName );
+std::vector< gamescope::GamescopeKnownDisplay > drm_get_connected_outputs();
 
 static void gamescope_control_display_sleep( struct wl_client *client, struct wl_resource *resource, uint32_t display_type_flags, uint32_t flags )
 {
@@ -1229,6 +1231,58 @@ static void gamescope_control_request_app_performance_stats( struct wl_client *c
 	wlserver.app_perf_requests[ app_id ].push_back( resource );
 }
 
+static gamescope::ConCommand cc_set_display("set_display", "Switch to a connected output by connector name (DP-1) or a substring of its make/model (e.g. ULTRAGEAR). No argument clears the override and falls back to --prefer-output.",
+[]( std::span<std::string_view> args )
+{
+	if ( args.size() < 2 || args[1].empty() )
+	{
+		drm_set_preferred_connector( nullptr );
+		return;
+	}
+
+	std::string query{ args[1] };
+	std::string queryLower = query;
+	std::transform( queryLower.begin(), queryLower.end(), queryLower.begin(), []( unsigned char c ){ return std::tolower( c ); } );
+
+	std::string exact;
+	std::vector<gamescope::GamescopeKnownDisplay> matches;
+	for ( const auto &display : drm_get_connected_outputs() )
+	{
+		if ( query == display.szConnectorName )
+		{
+			exact = display.szConnectorName;
+			break;
+		}
+		std::string identLower = display.szIdentifier;
+		std::transform( identLower.begin(), identLower.end(), identLower.begin(), []( unsigned char c ){ return std::tolower( c ); } );
+		if ( identLower.find( queryLower ) != std::string::npos )
+			matches.push_back( display );
+	}
+
+	if ( !exact.empty() )
+		drm_set_preferred_connector( exact.c_str() );
+	else if ( matches.size() == 1 )
+		drm_set_preferred_connector( matches[0].szConnectorName.c_str() );
+	else if ( matches.empty() )
+		console_log.errorf( "set_display: no connected display matches '%s'", query.c_str() );
+	else
+	{
+		console_log.errorf( "set_display: '%s' is ambiguous:", query.c_str() );
+		for ( const auto &match : matches )
+			console_log.errorf( "  %s (%s)", match.szConnectorName.c_str(), match.szIdentifier.c_str() );
+	}
+});
+
+static void gamescope_control_set_display( struct wl_client *client, struct wl_resource *resource, const char *connector_name )
+{
+	drm_set_preferred_connector( connector_name );
+}
+
+static void gamescope_control_unset_display( struct wl_client *client, struct wl_resource *resource )
+{
+	drm_set_preferred_connector( nullptr );
+}
+
 void wlserver_app_presented( uint32_t app_id, uint64_t frametime_ns )
 {
 	assert( wlserver_is_lock_held() );
@@ -1258,12 +1312,12 @@ static const struct gamescope_control_interface gamescope_control_impl = {
 	.set_look = gamescope_control_set_look,
 	.unset_look = gamescope_control_unset_look,
 	.request_app_performance_stats = gamescope_control_request_app_performance_stats,
+	.set_display = gamescope_control_set_display,
+	.unset_display = gamescope_control_unset_display,
 };
 
-static uint32_t get_conn_display_info_flags()
+static uint32_t get_conn_display_info_flags( gamescope::IBackendConnector *pConn )
 {
-	gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
-
 	if ( !pConn )
 		return 0;
 
@@ -1282,11 +1336,25 @@ void wlserver_send_gamescope_control( wl_resource *control )
 {
 	assert( wlserver_is_lock_held() );
 
+	// Sent before the early-return so the done event fires when no connector is active.
+	if ( wl_resource_get_version( control ) >= GAMESCOPE_CONTROL_AVAILABLE_DISPLAY_INFO_SINCE_VERSION )
+	{
+		for ( const auto &display : drm_get_connected_outputs() )
+		{
+			gamescope_control_send_available_display_info(
+				control,
+				display.szConnectorName.c_str(),
+				display.szMake.c_str(),
+				display.szModel.c_str(),
+				display.uFlags,
+				display.szIdentifier.c_str() );
+		}
+		gamescope_control_send_available_display_info_done( control );
+	}
+
 	gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
 	if ( !pConn )
 		return;
-
-	uint32_t flags = get_conn_display_info_flags();
 
 	struct wl_array display_rates;
 	wl_array_init(&display_rates);
@@ -1303,7 +1371,7 @@ void wlserver_send_gamescope_control( wl_resource *control )
 		uint32_t *ptr = (uint32_t *)wl_array_add( &display_rates, sizeof(uint32_t) );
 		*ptr = (uint32_t)gamescope::ConvertmHzToHz( g_nOutputRefresh );
 	}
-	gamescope_control_send_active_display_info( control, pConn->GetName(), pConn->GetMake(), pConn->GetModel(), flags, &display_rates );
+	gamescope_control_send_active_display_info( control, pConn->GetName(), pConn->GetMake(), pConn->GetModel(), get_conn_display_info_flags( pConn ), &display_rates );
 	wl_array_release(&display_rates);
 }
 
@@ -1328,6 +1396,7 @@ static void gamescope_control_bind( struct wl_client *client, void *data, uint32
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_MURA_CORRECTION, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_LOOK, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_PERF_QUERY, 1, 0 );
+	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_DISPLAY_SELECTION, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_DONE, 0, 0 );
 
 	wlserver_send_gamescope_control( resource );
@@ -1337,7 +1406,7 @@ static void gamescope_control_bind( struct wl_client *client, void *data, uint32
 
 static void create_gamescope_control( void )
 {
-	uint32_t version = 6;
+	uint32_t version = 7;
 	wl_global_create( wlserver.display, &gamescope_control_interface, version, NULL, gamescope_control_bind );
 }
 
