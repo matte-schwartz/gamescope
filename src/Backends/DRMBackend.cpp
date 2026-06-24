@@ -1245,6 +1245,79 @@ gamescope_liftoff_log_handler(enum liftoff_log_priority liftoff_priority, const 
 	liftoff_log_scope.vlogf(priority, fmt, args);
 }
 
+/* Pick any primary plane, ignoring CRTC routing, to bootstrap a headless start. */
+static gamescope::CDRMPlane *find_any_primary_plane(struct drm_t *drm)
+{
+	for ( std::unique_ptr< gamescope::CDRMPlane > &pPlane : drm->planes )
+	{
+		if ( pPlane->GetProperties().type->GetCurrentValue() == DRM_PLANE_TYPE_PRIMARY )
+			return pPlane.get();
+	}
+
+	return nullptr;
+}
+
+/* (Re)derive the composite/scanout formats from the current primary plane. */
+static bool derive_scanout_formats(struct drm_t *drm)
+{
+	wlr_drm_format_set_finish( &drm->primary_formats );
+
+	if ( !get_plane_formats( drm, drm->pPrimaryPlane, &drm->primary_formats ) )
+		return false;
+
+	// Pick a 10-bit format at first for our composition buffer, for a couple of reasons:
+	//
+	// 1. Many game engines automatically render to 10-bit formats such as UE4 which means
+	// that when we have to composite, we can keep the same HW dithering that we would get if
+	// we just scanned them out directly.
+	//
+	// 2. When compositing HDR content as a fallback when we undock, it avoids introducing
+	// a bunch of horrible banding when going to G2.2 curve.
+	// It ensures that we can dither that.
+	g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XRGB2101010, DRM_FORMAT_ARGB2101010);
+	if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
+		g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XBGR2101010, DRM_FORMAT_ABGR2101010);
+		if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
+			g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888);
+			if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
+				drm_log.errorf("Primary plane doesn't support any formats >= 8888");
+				return false;
+			}
+		}
+	}
+
+	if (have_overlay_planes(drm)) {
+		// ARGB8888 is the Xformat and AFormat here in this function as we want transparent overlay
+		g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB2101010);
+		if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
+			g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR2101010);
+			if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
+				g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB8888);
+				if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
+					drm_log.errorf("Overlay plane doesn't support any formats >= 8888");
+					return false;
+				}
+			}
+		}
+	} else {
+		switch (g_nDRMFormat) {
+		case DRM_FORMAT_XRGB2101010:
+			g_nDRMFormatOverlay = DRM_FORMAT_ARGB2101010;
+			break;
+		case DRM_FORMAT_ABGR2101010:
+			g_nDRMFormatOverlay = DRM_FORMAT_ABGR2101010;
+			break;
+		case DRM_FORMAT_XRGB8888:
+			g_nDRMFormatOverlay = DRM_FORMAT_ARGB8888;
+			break;
+		default:
+			return false;
+		}
+	}
+
+	return true;
+}
+
 bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 {
 	load_pnps();
@@ -1353,82 +1426,37 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 		drm_log.infof("  %s (%s)", pConnector->GetName(), status_str);
 	}
 
-	drm->connector_priorities = parse_connector_priorities( g_sOutputName );
-
-	if (!setup_best_connector(drm, true, true)) {
-		return false;
-	}
-
-	// Fetch formats which can be scanned out
+	// Fetch formats which can be scanned out. Done before picking a connector so
+	// drm_set_crtc can derive the scanout formats as soon as it binds a plane.
 	for ( std::unique_ptr< gamescope::CDRMPlane > &pPlane : drm->planes )
 	{
 		if ( !get_plane_formats( drm, pPlane.get(), &drm->formats ) )
 			return false;
 	}
 
+	drm->connector_priorities = parse_connector_priorities( g_sOutputName );
+
+	if (!setup_best_connector(drm, true, true)) {
+		return false;
+	}
+
 	// TODO: intersect primary planes formats instead
 	if ( !drm->pPrimaryPlane )
 		drm->pPrimaryPlane = find_primary_plane( drm );
+
+	// Headless start: no connector bound a CRTC plane, so derive formats off any
+	// primary plane. With a connector, drm_set_crtc already derived them.
+	if ( !drm->pPrimaryPlane )
+	{
+		drm->pPrimaryPlane = find_any_primary_plane( drm );
+		if ( drm->pPrimaryPlane && !derive_scanout_formats( drm ) )
+			return false;
+	}
 
 	if ( !drm->pPrimaryPlane )
 	{
 		drm_log.errorf("Failed to find a primary plane");
 		return false;
-	}
-
-	if ( !get_plane_formats( drm, drm->pPrimaryPlane, &drm->primary_formats ) )
-	{
-		return false;
-	}
-
-	// Pick a 10-bit format at first for our composition buffer, for a couple of reasons:
-	//
-	// 1. Many game engines automatically render to 10-bit formats such as UE4 which means
-	// that when we have to composite, we can keep the same HW dithering that we would get if
-	// we just scanned them out directly.
-	//
-	// 2. When compositing HDR content as a fallback when we undock, it avoids introducing
-	// a bunch of horrible banding when going to G2.2 curve.
-	// It ensures that we can dither that.
-	g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XRGB2101010, DRM_FORMAT_ARGB2101010);
-	if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
-		g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XBGR2101010, DRM_FORMAT_ABGR2101010);
-		if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
-			g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888);
-			if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
-				drm_log.errorf("Primary plane doesn't support any formats >= 8888");
-				return false;
-			}
-		}
-	}
-
-	if (have_overlay_planes(drm)) {
-		// ARGB8888 is the Xformat and AFormat here in this function as we want transparent overlay
-		g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB2101010);
-		if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
-			g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR2101010);
-			if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
-				g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB8888);
-				if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
-					drm_log.errorf("Overlay plane doesn't support any formats >= 8888");
-					return false;
-				}
-			}
-		}
-	} else {
-		switch (g_nDRMFormat) {
-		case DRM_FORMAT_XRGB2101010:
-			g_nDRMFormatOverlay = DRM_FORMAT_ARGB2101010;
-			break;
-		case DRM_FORMAT_ABGR2101010:
-			g_nDRMFormatOverlay = DRM_FORMAT_ABGR2101010;
-			break;
-		case DRM_FORMAT_XRGB8888:
-			g_nDRMFormatOverlay = DRM_FORMAT_ARGB8888;
-			break;
-		default:
-			return false;
-		}
 	}
 
 	// Create a pipe to wake the flip handler poll for immediate exit.
@@ -3206,25 +3234,38 @@ static bool drm_set_crtc( struct drm_t *drm, gamescope::CDRMCRTC *pCRTC )
 	drm->pPrimaryPlane = find_primary_plane( drm );
 	if ( drm->pPrimaryPlane == nullptr ) {
 		drm_log.errorf("could not find a suitable primary plane");
-		return false;
+		goto fail;
 	}
 
-	struct liftoff_output *lo_output = liftoff_output_create( drm->lo_device, pCRTC->GetObjectId() );
-	if ( lo_output == nullptr )
-		return false;
-
-	for ( int i = 0; i < k_nMaxLayers; i++ )
 	{
-		liftoff_layer_destroy( drm->lo_layers[ i ] );
-		drm->lo_layers[ i ] = liftoff_layer_create( lo_output );
-		if ( drm->lo_layers[ i ] == nullptr )
-			return false;
+		struct liftoff_output *lo_output = liftoff_output_create( drm->lo_device, pCRTC->GetObjectId() );
+		if ( lo_output == nullptr )
+			goto fail;
+
+		for ( int i = 0; i < k_nMaxLayers; i++ )
+		{
+			liftoff_layer_destroy( drm->lo_layers[ i ] );
+			drm->lo_layers[ i ] = liftoff_layer_create( lo_output );
+			if ( drm->lo_layers[ i ] == nullptr )
+				goto fail;
+		}
+
+		liftoff_output_destroy( drm->lo_output );
+		drm->lo_output = lo_output;
 	}
 
-	liftoff_output_destroy( drm->lo_output );
-	drm->lo_output = lo_output;
+	// The bound primary plane may differ from a headless-start bootstrap plane, so
+	// re-derive the scanout formats off the real CRTC's plane.
+	if ( !derive_scanout_formats( drm ) )
+		goto fail;
 
 	return true;
+
+fail:
+	// Keep the all-or-nothing invariant the present path relies on.
+	drm->pCRTC = nullptr;
+	drm->pPrimaryPlane = nullptr;
+	return false;
 }
 
 bool drm_set_connector( struct drm_t *drm, gamescope::CDRMConnector *conn )
