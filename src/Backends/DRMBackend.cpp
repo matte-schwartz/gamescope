@@ -738,6 +738,18 @@ static gamescope::CDRMPlane *find_primary_plane(struct drm_t *drm)
 	return nullptr;
 }
 
+/* Pick any primary plane, ignoring CRTC routing, to bootstrap a headless start. */
+static gamescope::CDRMPlane *find_any_primary_plane(struct drm_t *drm)
+{
+	for ( std::unique_ptr< gamescope::CDRMPlane > &pPlane : drm->planes )
+	{
+		if ( pPlane->GetProperties().type->GetCurrentValue() == DRM_PLANE_TYPE_PRIMARY )
+			return pPlane.get();
+	}
+
+	return nullptr;
+}
+
 static bool have_overlay_planes(struct drm_t *drm)
 {
 	if ( !drm->pCRTC )
@@ -1372,6 +1384,10 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 	if ( !drm->pPrimaryPlane )
 		drm->pPrimaryPlane = find_primary_plane( drm );
 
+	// Headless start, there is no CRTC to route through yet.
+	if ( !drm->pPrimaryPlane )
+		drm->pPrimaryPlane = find_any_primary_plane( drm );
+
 	if ( !drm->pPrimaryPlane )
 	{
 		drm_log.errorf("Failed to find a primary plane");
@@ -1420,12 +1436,15 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 	} else {
 		switch (g_nDRMFormat) {
 		case DRM_FORMAT_XRGB2101010:
+		case DRM_FORMAT_ARGB2101010:
 			g_nDRMFormatOverlay = DRM_FORMAT_ARGB2101010;
 			break;
+		case DRM_FORMAT_XBGR2101010:
 		case DRM_FORMAT_ABGR2101010:
 			g_nDRMFormatOverlay = DRM_FORMAT_ABGR2101010;
 			break;
 		case DRM_FORMAT_XRGB8888:
+		case DRM_FORMAT_ARGB8888:
 			g_nDRMFormatOverlay = DRM_FORMAT_ARGB8888;
 			break;
 		default:
