@@ -2415,8 +2415,10 @@ static void paint_pipewire()
 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 )  );
 	}
 
+	// Use the native XBGR2101010 order here; the reversed XRGB2101010 samples R/B
+	// swapped on the NVIDIA proprietary driver. This buffer is GPU-internal so the order is free to pick.
 	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
-		? vulkan_acquire_capture_texture( uWidth, uHeight, false, DRM_FORMAT_XRGB2101010 )
+		? vulkan_acquire_capture_texture( uWidth, uHeight, false, DRM_FORMAT_XBGR2101010 )
 		: gamescope::Rc<CVulkanTexture>{ s_pPipewireBuffer->texture };
 
 	gamescope::Rc<CVulkanTexture> pYUVTexture = s_pPipewireBuffer->texture->isYcbcr() ? s_pPipewireBuffer->texture : nullptr;
