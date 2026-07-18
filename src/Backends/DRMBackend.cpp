@@ -730,6 +730,20 @@ static gamescope::CDRMPlane *find_primary_plane(struct drm_t *drm)
 	return nullptr;
 }
 
+/* Pick any primary plane on the device, regardless of the chosen CRTC.
+ * Used to source the supported format list when starting up without any
+ * connected connector. */
+static gamescope::CDRMPlane *find_any_primary_plane(struct drm_t *drm)
+{
+	for ( std::unique_ptr< gamescope::CDRMPlane > &pPlane : drm->planes )
+	{
+		if ( pPlane->GetProperties().type->GetCurrentValue() == DRM_PLANE_TYPE_PRIMARY )
+			return pPlane.get();
+	}
+
+	return nullptr;
+}
+
 static bool have_overlay_planes(struct drm_t *drm)
 {
 	if ( !drm->pCRTC )
@@ -1364,13 +1378,21 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 	if ( !drm->pPrimaryPlane )
 		drm->pPrimaryPlane = find_primary_plane( drm );
 
-	if ( !drm->pPrimaryPlane )
+	// With no connector connected at startup there is no CRTC, so no primary
+	// plane. Fall back to any primary plane just to source the format list, so
+	// we can still come up headless. pPrimaryPlane stays unset (as in the
+	// disconnected state) and is picked properly in drm_set_crtc() on hotplug.
+	gamescope::CDRMPlane *pFormatPlane = drm->pPrimaryPlane;
+	if ( !pFormatPlane )
+		pFormatPlane = find_any_primary_plane( drm );
+
+	if ( !pFormatPlane )
 	{
 		drm_log.errorf("Failed to find a primary plane");
 		return false;
 	}
 
-	if ( !get_plane_formats( drm, drm->pPrimaryPlane, &drm->primary_formats ) )
+	if ( !get_plane_formats( drm, pFormatPlane, &drm->primary_formats ) )
 	{
 		return false;
 	}
