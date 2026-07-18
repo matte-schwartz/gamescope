@@ -62,6 +62,9 @@ extern int g_nPreferredOutputHeight;
 
 gamescope::ConVar<bool> cv_drm_single_plane_optimizations( "drm_single_plane_optimizations", true, "Whether or not to enable optimizations for single plane usage." );
 
+gamescope::ConVar<std::string> cv_drm_virtual_display_modes( "drm_virtual_display_modes", "1920x1080@60,1280x800@60,1280x720@60",
+	"Comma-separated WxH@Hz mode list exposed by the virtual display that stands in when no physical display is connected. The first entry is the preferred mode, used as the output size unless -W/-H are specified." );
+
 gamescope::ConVar<bool> cv_drm_debug_disable_shaper_and_3dlut( "drm_debug_disable_shaper_and_3dlut", false, "Shaper + 3DLUT chicken bit. (Force disable/DEFAULT, no logic change)" );
 gamescope::ConVar<bool> cv_drm_debug_disable_degamma_tf( "drm_debug_disable_degamma_tf", false, "Degamma chicken bit. (Forces DEGAMMA_TF to DEFAULT, does not affect other logic)" );
 gamescope::ConVar<bool> cv_drm_debug_disable_regamma_tf( "drm_debug_disable_regamma_tf", false, "Regamma chicken bit. (Forces REGAMMA_TF to DEFAULT, does not affect other logic)" );
@@ -74,6 +77,47 @@ gamescope::ConVar<bool> cv_drm_debug_disable_explicit_sync( "drm_debug_disable_e
 gamescope::ConVar<bool> cv_drm_debug_disable_in_fence_fd( "drm_debug_disable_in_fence_fd", false, "Force disable IN_FENCE_FD being set to avoid over-synchronization on the DRM backend." );
 
 gamescope::ConVar<bool> cv_drm_allow_dynamic_modes_for_external_display( "drm_allow_dynamic_modes_for_external_display", false, "Allow dynamic mode/refresh rate switching for external displays." );
+
+// Parse the cv_drm_virtual_display_modes list into modes. Falls back to a
+// single 1280x720 mode if the string is empty or unparseable.
+static std::vector<gamescope::BackendMode> parse_virtual_display_modes( const char *str )
+{
+	std::vector<gamescope::BackendMode> modes;
+	while ( str && *str )
+	{
+		if ( *str == ',' || *str == ' ' )
+		{
+			str++;
+			continue;
+		}
+
+		uint32_t width = 0, height = 0, refresh = 0;
+		int consumed = 0;
+		if ( sscanf( str, "%ux%u@%u%n", &width, &height, &refresh, &consumed ) == 3 ||
+		     sscanf( str, "%ux%u%n", &width, &height, &consumed ) == 2 )
+		{
+			if ( width && height )
+				modes.push_back( gamescope::BackendMode{ width, height, refresh ? refresh : 60 } );
+			str += consumed;
+		}
+		else
+		{
+			while ( *str && *str != ',' && *str != ' ' )
+				str++;
+		}
+	}
+
+	if ( modes.empty() )
+		modes.push_back( gamescope::BackendMode{ 1280, 720, 60 } );
+
+	return modes;
+}
+
+static gamescope::BackendMode get_virtual_display_preferred_mode()
+{
+	std::string modes = cv_drm_virtual_display_modes;
+	return parse_virtual_display_modes( modes.c_str() )[ 0 ];
+}
 
 int HackyDRMPresent( const FrameInfo_t *pFrameInfo, bool bAsync );
 
@@ -3287,8 +3331,15 @@ static void drm_unset_mode( struct drm_t *drm )
 	drm->pending.mode_id = 0;
 	drm->needs_modeset = true;
 
+	const gamescope::BackendMode virtualMode = get_virtual_display_preferred_mode();
+
 	g_nOutputWidth = drm->preferred_width;
 	g_nOutputHeight = drm->preferred_height;
+	if (g_nOutputWidth == 0 && g_nOutputHeight == 0)
+	{
+		g_nOutputWidth = virtualMode.uWidth;
+		g_nOutputHeight = virtualMode.uHeight;
+	}
 	if (g_nOutputHeight == 0)
 		g_nOutputHeight = 720;
 	if (g_nOutputWidth == 0)
@@ -3296,7 +3347,7 @@ static void drm_unset_mode( struct drm_t *drm )
 
 	g_nOutputRefresh = drm->preferred_refresh;
 	if (g_nOutputRefresh == 0)
-		g_nOutputRefresh = gamescope::ConvertHztomHz( 60 );
+		g_nOutputRefresh = gamescope::ConvertHztomHz( virtualMode.uRefresh );
 	g_nDynamicRefreshHz = 0;
 
 	g_bRotated = false;
@@ -3474,6 +3525,100 @@ namespace gamescope
 {
 	class CDRMBackend;
 
+	// Stand-in connector when no physical display is connected, so the session
+	// still exposes a display with a user-configurable mode list (see
+	// drm_virtual_display_modes) for e.g. Remote Play streaming. It never
+	// scans out; presents are dropped until a physical connector shows up.
+	class CDRMVirtualConnector final : public CBaseBackendConnector
+	{
+	public:
+		virtual GamescopeScreenType GetScreenType() const override
+		{
+			return GAMESCOPE_SCREEN_TYPE_EXTERNAL;
+		}
+		virtual GamescopePanelOrientation GetCurrentOrientation() const override
+		{
+			return GAMESCOPE_PANEL_ORIENTATION_0;
+		}
+		virtual bool SupportsHDR() const override
+		{
+			return false;
+		}
+		virtual bool IsHDRActive() const override
+		{
+			return false;
+		}
+		virtual const BackendConnectorHDRInfo &GetHDRInfo() const override
+		{
+			return m_HDRInfo;
+		}
+		virtual bool IsVRRActive() const override
+		{
+			return false;
+		}
+		virtual std::span<const BackendMode> GetModes() const override
+		{
+			UpdateModes();
+			return m_Modes;
+		}
+		virtual bool SupportsVRR() const override
+		{
+			return false;
+		}
+		virtual std::span<const uint8_t> GetRawEDID() const override
+		{
+			UpdateModes();
+			return m_FakeEdid;
+		}
+		virtual std::span<const uint32_t> GetValidDynamicRefreshRates() const override
+		{
+			return std::span<const uint32_t>{};
+		}
+		virtual void GetNativeColorimetry(
+			bool bHDR10,
+			displaycolorimetry_t *displayColorimetry, EOTF *displayEOTF,
+			displaycolorimetry_t *outputEncodingColorimetry, EOTF *outputEncodingEOTF ) const override
+		{
+			*displayColorimetry = displaycolorimetry_709;
+			*displayEOTF = EOTF_Gamma22;
+			*outputEncodingColorimetry = displaycolorimetry_709;
+			*outputEncodingEOTF = EOTF_Gamma22;
+		}
+		virtual const char *GetName() const override
+		{
+			return "Virtual";
+		}
+		virtual const char *GetMake() const override
+		{
+			return "Gamescope";
+		}
+		virtual const char *GetModel() const override
+		{
+			return "Virtual Display";
+		}
+		virtual int Present( const FrameInfo_t *pFrameInfo, bool bAsync ) override
+		{
+			return 0;
+		}
+
+	private:
+		void UpdateModes() const
+		{
+			std::string sModeString = cv_drm_virtual_display_modes;
+			if ( sModeString == m_sCurrentModeString )
+				return;
+
+			m_Modes = parse_virtual_display_modes( sModeString.c_str() );
+			m_FakeEdid = GenerateSimpleEdid( m_Modes[ 0 ].uWidth, m_Modes[ 0 ].uHeight );
+			m_sCurrentModeString = std::move( sModeString );
+		}
+
+		mutable std::string m_sCurrentModeString;
+		mutable std::vector<BackendMode> m_Modes;
+		mutable std::vector<uint8_t> m_FakeEdid;
+		BackendConnectorHDRInfo m_HDRInfo{};
+	};
+
 	class CDRMBackend final : public CBaseBackend
 	{
 	public:
@@ -3506,8 +3651,8 @@ namespace gamescope
 
 		virtual bool PostInit() override
 		{
-			if ( g_DRM.pConnector )
-				WritePatchedEdid( g_DRM.pConnector->GetRawEDID(), g_DRM.pConnector->GetHDRInfo(), g_bRotated );
+			if ( IBackendConnector *pConnector = GetCurrentConnector() )
+				WritePatchedEdid( pConnector->GetRawEDID(), pConnector->GetHDRInfo(), g_bRotated );
 			return true;
 		}
 
@@ -3879,7 +4024,10 @@ namespace gamescope
 
 		virtual IBackendConnector *GetCurrentConnector() override
 		{
-			return g_DRM.pConnector;
+			if ( g_DRM.pConnector )
+				return g_DRM.pConnector;
+
+			return &m_VirtualConnector;
 		}
 
 		virtual IBackendConnector *GetConnector( GamescopeScreenType eScreenType ) override
@@ -3985,6 +4133,8 @@ namespace gamescope
 
 		uint32_t m_uNextPresentCtx = 0;
 		DRMPresentCtx m_PresentCtxs[3];
+
+		CDRMVirtualConnector m_VirtualConnector;
 
 		bool SupportsColorManagement() const
 		{
