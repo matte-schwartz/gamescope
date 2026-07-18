@@ -87,6 +87,13 @@ static void calculate_capture_size()
 			s_nCaptureHeight = s_nRequestedHeight;
 		}
 	}
+
+	// NV12 is 4:2:0 subsampled, so odd dimensions are invalid for the format
+	// and reading the chroma plane of an image with odd height runs one row
+	// past the end of its allocation. Round up to keep the size even.
+	constexpr uint32_t kCaptureAlign = 2;
+	s_nCaptureWidth = SPA_ROUND_UP_N(std::max<uint32_t>(s_nCaptureWidth, kCaptureAlign), kCaptureAlign);
+	s_nCaptureHeight = SPA_ROUND_UP_N(std::max<uint32_t>(s_nCaptureHeight, kCaptureAlign), kCaptureAlign);
 }
 
 static void build_format_params(struct spa_pod_builder *builder, spa_video_format format, std::vector<const struct spa_pod *> &params) {
