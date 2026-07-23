@@ -2310,6 +2310,10 @@ static void update_touch_scaling( const struct FrameInfo_t *frameInfo )
 
 #if HAVE_PIPEWIRE
 static void pick_decoration_windows( focus_t *pFocus );
+static void carry_override_underlay( focus_t *pFocus, steamcompmgr_win_t *pPreviousOverride, steamcompmgr_win_t *pPreviousUnderlay );
+
+// Swept on window destroy so the repick can carry its override pointers forward.
+static focus_t s_PipewireFocus{};
 
 static void paint_pipewire()
 {
@@ -2357,14 +2361,17 @@ static void paint_pipewire()
 			s_ulLastFocusAppId = ulFocusAppId;
 		}
 
-		static focus_t s_PipewireFocus{};
 		if ( s_PipewireFocus.IsDirty() || bAppIdChange )
 		{
 			std::vector<steamcompmgr_win_t *> vecPossibleFocusWindows = GetGlobalPossibleFocusWindows();
 
+			steamcompmgr_win_t *pPreviousOverride = s_PipewireFocus.overrideWindow;
+			steamcompmgr_win_t *pPreviousUnderlay = s_PipewireFocus.overrideUnderlayWindow;
+
 			std::vector<uint32_t> vecAppIds{ uint32_t( ulFocusAppId ) };
 			pick_primary_focus_and_override( &s_PipewireFocus, None, vecPossibleFocusWindows, false, vecAppIds, 0, gamescope::VirtualConnectorStrategies::SteamControlled );
 			pick_decoration_windows( &s_PipewireFocus );
+			carry_override_underlay( &s_PipewireFocus, pPreviousOverride, pPreviousUnderlay );
 		}
 		pFocus = &s_PipewireFocus;
 	}
@@ -2383,10 +2390,12 @@ static void paint_pipewire()
 	// If the commits are the same as they were last time, don't repaint and don't push a new buffer on the stream.
 	static uint64_t s_ulLastFocusCommitId = 0;
 	static uint64_t s_ulLastOverrideCommitId = 0;
+	static uint64_t s_ulLastUnderlayCommitId = 0;
 	static uint64_t s_ulLastDecorationCommitId = 0;
 
 	uint64_t ulFocusCommitId = window_last_done_commit_id( pFocus->focusWindow );
 	uint64_t ulOverrideCommitId = window_last_done_commit_id( pFocus->overrideWindow );
+	uint64_t ulUnderlayCommitId = window_last_done_commit_id( pFocus->overrideUnderlayWindow );
 
 	// Combine the decoration commits so damage to any of them, or a change
 	// in the set itself, pushes a new frame.
@@ -2396,11 +2405,13 @@ static void paint_pipewire()
 
 	if ( ulFocusCommitId == s_ulLastFocusCommitId &&
 	     ulOverrideCommitId == s_ulLastOverrideCommitId &&
+	     ulUnderlayCommitId == s_ulLastUnderlayCommitId &&
 	     ulDecorationCommitId == s_ulLastDecorationCommitId )
 		return;
 
 	s_ulLastFocusCommitId = ulFocusCommitId;
 	s_ulLastOverrideCommitId = ulOverrideCommitId;
+	s_ulLastUnderlayCommitId = ulUnderlayCommitId;
 	s_ulLastDecorationCommitId = ulDecorationCommitId;
 
 	uint32_t uWidth = s_pPipewireBuffer->texture->width();
@@ -2416,6 +2427,9 @@ static void paint_pipewire()
 
 	// Paint the windows we have onto the Pipewire stream.
 	paint_window( pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
+
+	if ( pFocus->overrideUnderlayWindow && !pFocus->focusWindow->isSteamStreamingClient )
+		paint_window( pFocus->overrideUnderlayWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 
 	if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
 		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
@@ -2679,6 +2693,26 @@ paint_all( global_focus_t *pFocus, bool async )
 	// with an offset.
 	// Josh: No override if we're streaming video
 	// as we will have too many layers. Better to be safe than sorry.
+	// Leave room for the layers painted after these, so an underlay and a pile of helper windows
+	// cannot push out the Steam overlay or the cursor. The mura plane is not reserved and yields
+	// when the frame is full.
+	int nReservedLayers = 1; // cursor
+	if ( externalOverlay && externalOverlay->opacity && cv_paint_external_overlay_plane )
+		nReservedLayers++;
+	if ( cv_paint_steam_overlay_plane &&
+		 ( ( overlay && overlay->opacity ) ||
+		   ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() ) ) )
+		nReservedLayers++;
+	if ( notification && notification->opacity )
+		nReservedLayers++;
+
+	// The gate also budgets the override painted right below, which is unguarded.
+	if ( pFocus->overrideUnderlayWindow && w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane &&
+		 frameInfo.layerCount + ( override ? 1 : 0 ) < k_nMaxLayers - nReservedLayers )
+	{
+		paint_window(pFocus->overrideUnderlayWindow, w, &frameInfo, pFocus->cursor, PaintWindowFlag::NoFilter, 1.0f, override);
+	}
+
 	if ( override && w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane )
 	{
 		paint_window(override, w, &frameInfo, pFocus->cursor, PaintWindowFlag::NoFilter, 1.0f, override);
@@ -2690,19 +2724,6 @@ paint_all( global_focus_t *pFocus, bool async )
 	// Decorations (eg. Xalia's highlight) paint like overrides, above them.
 	if ( w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane )
 	{
-		// Leave room for the layers painted after decorations, so a pile of
-		// helper windows cannot push out the Steam overlay or the cursor.
-		// The mura plane is not reserved and yields when the frame is full.
-		int nReservedLayers = 1; // cursor
-		if ( externalOverlay && externalOverlay->opacity && cv_paint_external_overlay_plane )
-			nReservedLayers++;
-		if ( cv_paint_steam_overlay_plane &&
-			 ( ( overlay && overlay->opacity ) ||
-			   ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() ) ) )
-			nReservedLayers++;
-		if ( notification && notification->opacity )
-			nReservedLayers++;
-
 		for ( steamcompmgr_win_t *decoration : pFocus->decorationWindows )
 		{
 			if ( frameInfo.layers.count() >= k_nMaxLayers - nReservedLayers )
@@ -3021,6 +3042,8 @@ paint_all( global_focus_t *pFocus, bool async )
 				currentOutputHeight = uScreenshotHeight;
 
 				paint_window( pFocus->focusWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
+				if ( pFocus->overrideUnderlayWindow && !pFocus->focusWindow->isSteamStreamingClient )
+					paint_window( pFocus->overrideUnderlayWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 				if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
 					paint_window( pFocus->overrideWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 				if ( !pFocus->focusWindow->isSteamStreamingClient )
@@ -3641,6 +3664,30 @@ static void pick_decoration_windows( focus_t *pFocus )
 
 	// ctx->list runs top to bottom, we paint the other way.
 	std::reverse( pFocus->decorationWindows.begin(), pFocus->decorationWindows.end() );
+}
+
+// A dialog should not blink out while its own popup (eg. a combo box list or a nested
+// message box) takes the override slot, so keep the previous override painted beneath it.
+static void
+carry_override_underlay( focus_t *pFocus, steamcompmgr_win_t *pPreviousOverride, steamcompmgr_win_t *pPreviousUnderlay )
+{
+	pFocus->overrideUnderlayWindow = pPreviousUnderlay;
+	if ( pFocus->focusWindow && pFocus->overrideWindow && pPreviousOverride &&
+		 pFocus->overrideWindow != pPreviousOverride &&
+		 pPreviousOverride != pFocus->focusWindow &&
+		 pPreviousOverride->pid == pFocus->focusWindow->pid &&
+		 is_good_override_candidate( pPreviousOverride, pFocus->focusWindow ) )
+		pFocus->overrideUnderlayWindow = pPreviousOverride;
+
+	if ( pFocus->overrideUnderlayWindow )
+	{
+		steamcompmgr_win_t *underlay = pFocus->overrideUnderlayWindow;
+		if ( !pFocus->overrideWindow || underlay == pFocus->overrideWindow ||
+			 underlay->type != steamcompmgr_win_type_t::XWAYLAND ||
+			 underlay->xwayland().a.map_state != IsViewable ||
+			 !is_good_override_candidate( underlay, pFocus->focusWindow ) )
+			pFocus->overrideUnderlayWindow = nullptr;
+	}
 }
 
 static void
@@ -4367,6 +4414,8 @@ determine_and_apply_focus( global_focus_t *pFocus )
 		pFocus->ulVirtualFocusKey,
 		gamescope::cv_backend_virtual_connector_strategy );
 
+	carry_override_underlay( pFocus, previousLocalFocus.overrideWindow, previousLocalFocus.overrideUnderlayWindow );
+
 	// Pick overlay/notifications from root ctx
 	pFocus->overlayWindow = root_ctx->focus.overlayWindow;
 	pFocus->externalOverlayWindow = root_ctx->focus.externalOverlayWindow;
@@ -4383,9 +4432,6 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	}
 
 	pick_decoration_windows( pFocus );
-
-	if ( pFocus->decorationWindows != previousLocalFocus.decorationWindows )
-		hasRepaintNonBasePlane = true;
 
 	bool bUseOverlay = gamescope::VirtualConnectorIsSingleOutput() || gamescope::VirtualConnectorKeyIsSteam( pFocus->ulVirtualFocusKey );
 	if ( !bUseOverlay )
@@ -4424,6 +4470,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 					pFocus->keyboardFocusWindow = queryWindow;
 
 					pFocus->overrideWindow = nullptr;
+					pFocus->overrideUnderlayWindow = nullptr;
 					pFocus->decorationWindows.clear();
 				}
 
@@ -4435,11 +4482,17 @@ determine_and_apply_focus( global_focus_t *pFocus )
 					//pFocus->inputFocusWindow = queryWindow;
 
 					pFocus->overrideWindow = nullptr;
+					pFocus->overrideUnderlayWindow = nullptr;
 					pFocus->decorationWindows.clear();
 				}
 			}
 		}
 	}
+
+	// After the VR forwarder has had its say, since it clears both.
+	if ( pFocus->decorationWindows != previousLocalFocus.decorationWindows ||
+		 pFocus->overrideUnderlayWindow != previousLocalFocus.overrideUnderlayWindow )
+		hasRepaintNonBasePlane = true;
 
 	// Pick cursor from our input focus window
 
@@ -5549,14 +5602,25 @@ destroy_win(xwayland_ctx_t *ctx, Window id, bool gone, bool fade)
 			pFocus->overlayWindow = nullptr;
 		if (x11_win(pFocus->notificationWindow) == id && gone)
 			pFocus->notificationWindow = nullptr;
-		if (x11_win(pFocus->overrideWindow) == id && gone)
+		// These are dereferenced on a later focus pass, and finish_destroy_win frees the window
+		// whether or not it is gone, so clear them either way.
+		if (x11_win(pFocus->overrideWindow) == id)
 			pFocus->overrideWindow = nullptr;
+		if (x11_win(pFocus->overrideUnderlayWindow) == id)
+			pFocus->overrideUnderlayWindow = nullptr;
 		if (x11_win(pFocus->fadeWindow) == id && gone)
 			pFocus->fadeWindow = nullptr;
-		if (gone)
-			std::erase_if(pFocus->decorationWindows, [id](steamcompmgr_win_t *w) { return x11_win(w) == id; });
+		std::erase_if(pFocus->decorationWindows, [id](steamcompmgr_win_t *w) { return x11_win(w) == id; });
 	}
-		
+
+#if HAVE_PIPEWIRE
+	// The pipewire repick dereferences these when carrying the underlay.
+	if (x11_win(s_PipewireFocus.overrideWindow) == id)
+		s_PipewireFocus.overrideWindow = nullptr;
+	if (x11_win(s_PipewireFocus.overrideUnderlayWindow) == id)
+		s_PipewireFocus.overrideUnderlayWindow = nullptr;
+#endif
+
 	MakeFocusDirty();
 
 	finish_destroy_win(ctx, id, gone);
@@ -6815,6 +6879,11 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 					pFocus->overrideWindow->xwayland().ctx == server->ctx.get())
 					pFocus->overrideWindow = nullptr;
 
+				if (pFocus->overrideUnderlayWindow &&
+					pFocus->overrideUnderlayWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
+					pFocus->overrideUnderlayWindow->xwayland().ctx == server->ctx.get())
+					pFocus->overrideUnderlayWindow = nullptr;
+
 				std::erase_if(pFocus->decorationWindows, [&](steamcompmgr_win_t *pDecoration)
 				{
 					return pDecoration->type == steamcompmgr_win_type_t::XWAYLAND &&
@@ -6835,6 +6904,18 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 					pFocus->cursor->getCtx() == server->ctx.get())
 					pFocus->cursor = nullptr;
 			}
+
+#if HAVE_PIPEWIRE
+			if (s_PipewireFocus.overrideWindow &&
+				s_PipewireFocus.overrideWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
+				s_PipewireFocus.overrideWindow->xwayland().ctx == server->ctx.get())
+				s_PipewireFocus.overrideWindow = nullptr;
+
+			if (s_PipewireFocus.overrideUnderlayWindow &&
+				s_PipewireFocus.overrideUnderlayWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
+				s_PipewireFocus.overrideUnderlayWindow->xwayland().ctx == server->ctx.get())
+				s_PipewireFocus.overrideUnderlayWindow = nullptr;
+#endif
 
 			wlserver_lock();
 			g_SteamCompMgrWaiter.RemoveWaitable( server->ctx.get() );
@@ -7089,7 +7170,7 @@ bool handle_done_commit( steamcompmgr_win_t *w, xwayland_ctx_t *ctx, uint64_t co
 					focusWindow_pid = w->pid;
 				}
 
-				if ( w == pFocus->overrideWindow ||
+				if ( w == pFocus->overrideWindow || w == pFocus->overrideUnderlayWindow ||
 					 std::find( pFocus->decorationWindows.begin(), pFocus->decorationWindows.end(), w ) != pFocus->decorationWindows.end() )
 				{
 					hasRepaintNonBasePlane = true;
@@ -8334,6 +8415,8 @@ void steamcompmgr_check_xdg(bool vblank, uint64_t vblank_idx)
 				pFocus->notificationWindow = nullptr;
 			if (pFocus->overrideWindow && pFocus->overrideWindow->type == steamcompmgr_win_type_t::XDG)
 				pFocus->overrideWindow = nullptr;
+			if (pFocus->overrideUnderlayWindow && pFocus->overrideUnderlayWindow->type == steamcompmgr_win_type_t::XDG)
+				pFocus->overrideUnderlayWindow = nullptr;
 			if (pFocus->fadeWindow && pFocus->fadeWindow->type == steamcompmgr_win_type_t::XDG)
 				pFocus->fadeWindow = nullptr;
 			if (pFocus->keyboardFocusWindow && pFocus->keyboardFocusWindow->type == steamcompmgr_win_type_t::XDG)
