@@ -2708,7 +2708,7 @@ paint_all( global_focus_t *pFocus, bool async )
 
 	// The gate also budgets the override painted right below, which is unguarded.
 	if ( pFocus->overrideUnderlayWindow && w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane &&
-		 frameInfo.layerCount + ( override ? 1 : 0 ) < k_nMaxLayers - nReservedLayers )
+		 frameInfo.layers.count() + ( override ? 1 : 0 ) < k_nMaxLayers - nReservedLayers )
 	{
 		paint_window(pFocus->overrideUnderlayWindow, w, &frameInfo, pFocus->cursor, PaintWindowFlag::NoFilter, 1.0f, override);
 	}
@@ -3677,7 +3677,11 @@ carry_override_underlay( focus_t *pFocus, steamcompmgr_win_t *pPreviousOverride,
 		 pPreviousOverride != pFocus->focusWindow &&
 		 pPreviousOverride->pid == pFocus->focusWindow->pid &&
 		 is_good_override_candidate( pPreviousOverride, pFocus->focusWindow ) )
+	{
 		pFocus->overrideUnderlayWindow = pPreviousOverride;
+		focus_log.debugf( "Override underlay set: %s (%x)",
+			pFocus->overrideUnderlayWindow->debug_name(), pFocus->overrideUnderlayWindow->id() );
+	}
 
 	if ( pFocus->overrideUnderlayWindow )
 	{
@@ -3686,7 +3690,11 @@ carry_override_underlay( focus_t *pFocus, steamcompmgr_win_t *pPreviousOverride,
 			 underlay->type != steamcompmgr_win_type_t::XWAYLAND ||
 			 underlay->xwayland().a.map_state != IsViewable ||
 			 !is_good_override_candidate( underlay, pFocus->focusWindow ) )
+		{
+			if ( underlay != pFocus->overrideWindow )
+				focus_log.debugf( "Override underlay dropped: %s (%x)", underlay->debug_name(), underlay->id() );
 			pFocus->overrideUnderlayWindow = nullptr;
+		}
 	}
 }
 
@@ -4413,6 +4421,16 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	gameFocused = pick_primary_focus_and_override( pFocus, root_ctx->focusControlWindow, vecPossibleFocusWindows, true, vecFocuscontrolAppIDs,
 		pFocus->ulVirtualFocusKey,
 		gamescope::cv_backend_virtual_connector_strategy );
+
+	if ( pFocus->overrideWindow != previousLocalFocus.overrideWindow )
+	{
+		if ( pFocus->overrideWindow )
+			focus_log.debugf( "Override pick: %s (%x) override_redirect=%d pid=%d",
+				pFocus->overrideWindow->debug_name(), pFocus->overrideWindow->id(),
+				(int)win_is_override_redirect( pFocus->overrideWindow ), pFocus->overrideWindow->pid );
+		else
+			focus_log.debugf( "Override pick: none" );
+	}
 
 	carry_override_underlay( pFocus, previousLocalFocus.overrideWindow, previousLocalFocus.overrideUnderlayWindow );
 
