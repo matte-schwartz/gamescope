@@ -1929,20 +1929,20 @@ LiftoffStateCacheEntry FrameInfoToLiftoffStateCacheEntry( struct drm_t *drm, con
 {
 	LiftoffStateCacheEntry entry{};
 
-	entry.nLayerCount = frameInfo->layerCount;
+	entry.nLayerCount = frameInfo->layers.count();
 	for ( int i = 0; i < entry.nLayerCount; i++ )
 	{
-		const uint16_t srcWidth  = frameInfo->layers[ i ].tex->width();
-		const uint16_t srcHeight = frameInfo->layers[ i ].tex->height();
+		const uint16_t srcWidth  = frameInfo->layers.get( i ).tex->width();
+		const uint16_t srcHeight = frameInfo->layers.get( i ).tex->height();
 
-		int32_t crtcX = -frameInfo->layers[ i ].offset.x;
-		int32_t crtcY = -frameInfo->layers[ i ].offset.y;
-		uint64_t crtcW = srcWidth / frameInfo->layers[ i ].scale.x;
-		uint64_t crtcH = srcHeight / frameInfo->layers[ i ].scale.y;
+		int32_t crtcX = -frameInfo->layers.get( i ).offset.x;
+		int32_t crtcY = -frameInfo->layers.get( i ).offset.y;
+		uint64_t crtcW = srcWidth / frameInfo->layers.get( i ).scale.x;
+		uint64_t crtcH = srcHeight / frameInfo->layers.get( i ).scale.y;
 
 		if (g_bRotated && g_uOutputRotation == 0)
 		{
-			int64_t imageH = frameInfo->layers[ i ].tex->contentHeight() / frameInfo->layers[ i ].scale.y;
+			int64_t imageH = frameInfo->layers.get( i ).tex->contentHeight() / frameInfo->layers.get( i ).scale.y;
 
 			const int32_t x = crtcX;
 			const uint64_t w = crtcW;
@@ -1952,15 +1952,15 @@ LiftoffStateCacheEntry FrameInfoToLiftoffStateCacheEntry( struct drm_t *drm, con
 			crtcH = w;
 		}
 
-		entry.layerState[i].zpos  = frameInfo->layers[ i ].zpos;
+		entry.layerState[i].zpos  = frameInfo->layers.get( i ).zpos;
 		entry.layerState[i].srcW  = srcWidth  << 16;
 		entry.layerState[i].srcH  = srcHeight << 16;
 		entry.layerState[i].crtcX = crtcX;
 		entry.layerState[i].crtcY = crtcY;
 		entry.layerState[i].crtcW = crtcW;
 		entry.layerState[i].crtcH = crtcH;
-		entry.layerState[i].opacity = frameInfo->layers[i].opacity * 0xffff;
-		entry.layerState[i].ycbcr = frameInfo->layers[i].isYcbcr();
+		entry.layerState[i].opacity = frameInfo->layers.get( i ).opacity * 0xffff;
+		entry.layerState[i].ycbcr = frameInfo->layers.get( i ).isYcbcr();
 		if ( entry.layerState[i].ycbcr )
 		{
 			entry.layerState[i].colorEncoding = drm_get_color_encoding( g_ForcedNV12ColorSpace );
@@ -1969,9 +1969,9 @@ LiftoffStateCacheEntry FrameInfoToLiftoffStateCacheEntry( struct drm_t *drm, con
 		}
 		else
 		{
-			entry.layerState[i].colorspace = frameInfo->layers[ i ].colorspace;
+			entry.layerState[i].colorspace = frameInfo->layers.get( i ).colorspace;
 		}
-		entry.layerState[i].eAlphaBlendingMode = frameInfo->layers[i].eAlphaBlendingMode;
+		entry.layerState[i].eAlphaBlendingMode = frameInfo->layers.get( i ).eAlphaBlendingMode;
 	}
 
 	return entry;
@@ -2634,13 +2634,13 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 			return -EINVAL;
 	}
 
-	bool bSinglePlane = frameInfo->layerCount < 2 && cv_drm_single_plane_optimizations;
+	bool bSinglePlane = frameInfo->layers.count() < 2 && cv_drm_single_plane_optimizations;
 
 	for ( int i = 0; i < k_nMaxLayers; i++ )
 	{
-		if ( i < frameInfo->layerCount )
+		if ( i < frameInfo->layers.count() )
 		{
-			const FrameInfo_t::Layer_t *pLayer = &frameInfo->layers[ i ];
+			const FrameInfo_t::Layer_t *pLayer = &frameInfo->layers.get( i );
 			gamescope::CDRMFb *pDrmFb = static_cast<gamescope::CDRMFb *>( (pLayer->tex && pLayer->tex->GetBackendFb()) ? pLayer->tex->GetBackendFb()->EnsureImported() : nullptr );
 
 			if ( pDrmFb == nullptr )
@@ -2657,11 +2657,11 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 			drm->m_FbIdsInRequest.emplace_back( pDrmFb );
 
 			liftoff_layer_set_property( drm->lo_layers[ i ], "zpos", entry.layerState[i].zpos );
-			liftoff_layer_set_property( drm->lo_layers[ i ], "alpha", frameInfo->layers[ i ].opacity * 0xffff);
+			liftoff_layer_set_property( drm->lo_layers[ i ], "alpha", frameInfo->layers.get( i ).opacity * 0xffff);
 
 			if ( entry.layerState[i].zpos != g_zposBase )
 			{
-				liftoff_layer_set_property( drm->lo_layers[ i ], "pixel blend mode", (uint64_t) frameInfo->layers[i].eAlphaBlendingMode );
+				liftoff_layer_set_property( drm->lo_layers[ i ], "pixel blend mode", (uint64_t) frameInfo->layers.get( i ).eAlphaBlendingMode );
 			}
 			else
 			{
@@ -2698,7 +2698,7 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 			liftoff_layer_set_property( drm->lo_layers[ i ], "CRTC_W", entry.layerState[i].crtcW);
 			liftoff_layer_set_property( drm->lo_layers[ i ], "CRTC_H", entry.layerState[i].crtcH);
 
-			if ( frameInfo->layers[i].applyColorMgmt )
+			if ( frameInfo->layers.get( i ).applyColorMgmt )
 			{
 				bool bYCbCr = entry.layerState[i].ycbcr;
 
@@ -2780,8 +2780,8 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 				else
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_BLEND_TF", AMDGPU_TRANSFER_FUNCTION_DEFAULT );
 
-				if (!cv_drm_debug_disable_ctm && frameInfo->layers[i].ctm != nullptr)
-					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_CTM", frameInfo->layers[i].ctm->GetBlobValue() );
+				if (!cv_drm_debug_disable_ctm && frameInfo->layers.get( i ).ctm != nullptr)
+					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_CTM", frameInfo->layers.get( i ).ctm->GetBlobValue() );
 				else
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_CTM", 0 );
 			}
@@ -2824,7 +2824,7 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 	if ( ret == -EPERM && !attempted_in_fence_fallback && !cv_drm_debug_disable_in_fence_fd )
 	{
 		attempted_in_fence_fallback = true;
-		for ( int i = 0; i < frameInfo->layerCount; i++ )
+		for ( int i = 0; i < frameInfo->layers.count(); i++ )
 		{
 			liftoff_layer_set_property( drm->lo_layers[ i ], "IN_FENCE_FD", -1 );
 		}
@@ -2855,9 +2855,9 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 	}
 
 	if ( ret == 0 )
-		drm_log.debugf( "can drm present %i layers", frameInfo->layerCount );
+		drm_log.debugf( "can drm present %i layers", frameInfo->layers.count() );
 	else
-		drm_log.debugf( "can NOT drm present %i layers", frameInfo->layerCount );
+		drm_log.debugf( "can NOT drm present %i layers", frameInfo->layers.count() );
 
 	return ret;
 }
@@ -2997,7 +2997,7 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 	assert( drm->req == nullptr );
 	drm->req = drmModeAtomicAlloc();
 
-	bool bSinglePlane = frameInfo->layerCount < 2 && cv_drm_single_plane_optimizations;
+	bool bSinglePlane = frameInfo->layers.count() < 2 && cv_drm_single_plane_optimizations;
 
 	if ( drm_supports_color_mgmt( &g_DRM ) && frameInfo->applyOutputColorMgmt )
 	{
@@ -3627,23 +3627,23 @@ namespace gamescope
 			drm_log.debugf( "CDRMBackend::Present Begin: %lu -> delta: %lu", ulNow, ulNow - s_ulLastTime );
 			s_ulLastTime = ulNow;
 
-			bool bWantsPartialComposite = pFrameInfo->layerCount >= 3 && !kDisablePartialComposition;
+			bool bWantsPartialComposite = pFrameInfo->layers.count() >= 3 && !kDisablePartialComposition;
 
 			static bool s_bWasFirstFrame = true;
 			bool bWasFirstFrame = s_bWasFirstFrame;
 			s_bWasFirstFrame = false;
 
 			bool bDrewCursor = false;
-			for ( uint32_t i = 0; i < k_nMaxLayers; i++ )
+			for ( int i = 0; i < pFrameInfo->layers.count(); i++ )
 			{
-				if ( pFrameInfo->layers[i].zpos == g_zposCursor )
+				if ( pFrameInfo->layers.get( i ).zpos == g_zposCursor )
 				{
 					bDrewCursor = true;
 					break;
 				}
 			}
 
-			bool bLayer0ScreenSize = close_enough(pFrameInfo->layers[0].scale.x, 1.0f) && close_enough(pFrameInfo->layers[0].scale.y, 1.0f);
+			bool bLayer0ScreenSize = close_enough(pFrameInfo->layers.get( 0 ).scale.x, 1.0f) && close_enough(pFrameInfo->layers.get( 0 ).scale.y, 1.0f);
 
 			bool bNeedsCompositeFromFilter = (g_upscaleFilter == GamescopeUpscaleFilter::NEAREST || g_upscaleFilter == GamescopeUpscaleFilter::PIXEL) && !bLayer0ScreenSize;
 
@@ -3663,12 +3663,12 @@ namespace gamescope
 			{
 				bNeedsFullComposite |= g_bHDRItmEnable;
 				if ( !SupportsColorManagement() )
-					bNeedsFullComposite |= ( pFrameInfo->layerCount > 1 || pFrameInfo->layers[0].colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ );
+					bNeedsFullComposite |= ( pFrameInfo->layers.count() > 1 || pFrameInfo->layers.get( 0 ).colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ );
 			}
 			else
 			{
 				if ( !SupportsColorManagement() )
-					bNeedsFullComposite |= ColorspaceIsHDR( pFrameInfo->layers[0].colorspace );
+					bNeedsFullComposite |= ColorspaceIsHDR( pFrameInfo->layers.get( 0 ).colorspace );
 			}
 
 			bNeedsFullComposite |= !!(g_uCompositeDebug & CompositeDebugFlag::Heatmap);
@@ -3697,8 +3697,8 @@ namespace gamescope
 				// Scanout + Planes Path
 				m_bWasPartialCompositing = false;
 				m_bWasCompositing = false;
-				if ( pFrameInfo->layerCount == 2 )
-					m_nLastSingleOverlayZPos = pFrameInfo->layers[1].zpos;
+				if ( pFrameInfo->layers.count() == 2 )
+					m_nLastSingleOverlayZPos = pFrameInfo->layers.get( 1 ).zpos;
 
 				return Commit( pFrameInfo );
 			}
@@ -3709,7 +3709,7 @@ namespace gamescope
 
 			FrameInfo_t compositeFrameInfo = *pFrameInfo;
 
-			if ( compositeFrameInfo.layerCount == 1 )
+			if ( compositeFrameInfo.layers.count() == 1 )
 			{
 				// If we failed to flip a single plane then
 				// we definitely need to composite for some reason...
@@ -3720,7 +3720,7 @@ namespace gamescope
 			{
 				// If we want to partial composite, fallback to full
 				// composite if we have mismatching colorspaces in our overlays.
-				// This is 2, and we do i-1 so 1...layerCount. So AFTER we have removed baseplane.
+				// This is 2, and we do i-1 so 1...layers.count(). So AFTER we have removed baseplane.
 				// Overlays only.
 				//
 				// Josh:
@@ -3731,9 +3731,9 @@ namespace gamescope
 				// We can't just point it to random BDA or whatever, it has to be uploaded slowly
 				// thru registers which is SUPER SLOW.
 				// This avoids stutter.
-				for ( int i = 2; i < compositeFrameInfo.layerCount; i++ )
+				for ( int i = 2; i < compositeFrameInfo.layers.count(); i++ )
 				{
-					if ( pFrameInfo->layers[i - 1].colorspace != pFrameInfo->layers[i].colorspace )
+					if ( pFrameInfo->layers.get( i - 1 ).colorspace != pFrameInfo->layers.get( i ).colorspace )
 					{
 						bNeedsFullComposite = true;
 						break;
@@ -3752,9 +3752,9 @@ namespace gamescope
 			// from our frameinfo to composite.
 			if ( !bNeedsFullComposite )
 			{
-				for ( int i = 1; i < compositeFrameInfo.layerCount; i++ )
-					compositeFrameInfo.layers[i - 1] = compositeFrameInfo.layers[i];
-				compositeFrameInfo.layerCount -= 1;
+				for ( int i = 1; i < compositeFrameInfo.layers.count(); i++ )
+					compositeFrameInfo.layers.get( i - 1 ) = compositeFrameInfo.layers.get( i );
+				compositeFrameInfo.layers.pop();
 
 				// When doing partial composition, apply the shaper + 3D LUT stuff
 				// at scanout.
@@ -3790,9 +3790,8 @@ namespace gamescope
 			if ( bNeedsFullComposite )
 			{
 				presentCompFrameInfo.applyOutputColorMgmt = false;
-				presentCompFrameInfo.layerCount = 1;
-
-				FrameInfo_t::Layer_t *baseLayer = &presentCompFrameInfo.layers[ 0 ];
+				FrameInfo_t::Layer_t *baseLayer = presentCompFrameInfo.layers.push();
+				assert( baseLayer );
 				baseLayer->scale.x = 1.0;
 				baseLayer->scale.y = 1.0;
 				baseLayer->opacity = 1.0;
@@ -3812,12 +3811,13 @@ namespace gamescope
 				if ( m_bWasPartialCompositing || !bDefer )
 				{
 					presentCompFrameInfo.applyOutputColorMgmt = g_ColorMgmt.pending.enabled;
-					presentCompFrameInfo.layerCount = 2;
+					FrameInfo_t::Layer_t *baseLayer = presentCompFrameInfo.layers.push();
+					assert( baseLayer );
+					*baseLayer = pFrameInfo->layers.get( 0 );
+					baseLayer->zpos = g_zposBase;
 
-					presentCompFrameInfo.layers[ 0 ] = pFrameInfo->layers[ 0 ];
-					presentCompFrameInfo.layers[ 0 ].zpos = g_zposBase;
-
-					FrameInfo_t::Layer_t *overlayLayer = &presentCompFrameInfo.layers[ 1 ];
+					FrameInfo_t::Layer_t *overlayLayer = presentCompFrameInfo.layers.push();
+					assert( overlayLayer );
 					overlayLayer->scale.x = 1.0;
 					overlayLayer->scale.y = 1.0;
 					overlayLayer->opacity = 1.0;
@@ -3830,35 +3830,34 @@ namespace gamescope
 					// Partial composition stuff has the same colorspace.
 					// So read that from the composite frame info
 					overlayLayer->ctm = nullptr;
-					overlayLayer->colorspace = compositeFrameInfo.layers[0].colorspace;
+					overlayLayer->colorspace = compositeFrameInfo.layers.get( 0 ).colorspace;
 				}
 				else
 				{
 					// Use whatever overlay we had last while waiting for the
 					// partial composition to have anything queued.
 					presentCompFrameInfo.applyOutputColorMgmt = g_ColorMgmt.pending.enabled;
-					presentCompFrameInfo.layerCount = 1;
-
-					presentCompFrameInfo.layers[ 0 ] = pFrameInfo->layers[ 0 ];
-					presentCompFrameInfo.layers[ 0 ].zpos = g_zposBase;
+					FrameInfo_t::Layer_t *baseLayer = presentCompFrameInfo.layers.push();
+					assert( baseLayer );
+					*baseLayer = pFrameInfo->layers.get( 0 );
+					baseLayer->zpos = g_zposBase;
 
 					const FrameInfo_t::Layer_t *lastPresentedOverlayLayer = nullptr;
-					for (int i = 0; i < pFrameInfo->layerCount; i++)
+					for (int i = 0; i < pFrameInfo->layers.count(); i++)
 					{
-						if ( pFrameInfo->layers[i].zpos == m_nLastSingleOverlayZPos )
+						if ( pFrameInfo->layers.get( i ).zpos == m_nLastSingleOverlayZPos )
 						{
-							lastPresentedOverlayLayer = &pFrameInfo->layers[i];
+							lastPresentedOverlayLayer = &pFrameInfo->layers.get( i );
 							break;
 						}
 					}
 
 					if ( lastPresentedOverlayLayer )
 					{
-						FrameInfo_t::Layer_t *overlayLayer = &presentCompFrameInfo.layers[ 1 ];
+						FrameInfo_t::Layer_t *overlayLayer = presentCompFrameInfo.layers.push();
+						assert( overlayLayer );
 						*overlayLayer = *lastPresentedOverlayLayer;
 						overlayLayer->zpos = g_zposOverlay;
-
-						presentCompFrameInfo.layerCount = 2;
 					}
 				}
 
@@ -4209,4 +4208,3 @@ int HackyDRMPresent( const FrameInfo_t *pFrameInfo, bool bAsync )
 {
 	return static_cast<gamescope::CDRMBackend *>( GetBackend() )->Present( pFrameInfo, bAsync );
 }
-
