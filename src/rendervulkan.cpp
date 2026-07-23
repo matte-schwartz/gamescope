@@ -3742,8 +3742,8 @@ struct BlitPushData_t
 		u_alphaMode = 0;
 		u_rotation = rotation;
 
-		for (int i = 0; i < frameInfo->layerCount; i++) {
-			const FrameInfo_t::Layer_t *layer = &frameInfo->layers[i];
+		for (int i = 0; i < frameInfo->layers.count(); i++) {
+			const FrameInfo_t::Layer_t *layer = &frameInfo->layers.get( i );
 			scale[i] = layer->scale;
 			offset[i] = layer->offsetPixelCenter();
 			opacity[i] = layer->opacity;
@@ -3879,17 +3879,17 @@ struct RcasPushData_t
 		uvec4_t tmp;
 		FsrRcasCon(&tmp.x, sharpness);
 		u_rotation = rotation;
-		u_layer0Offset.x = uint32_t(int32_t(frameInfo->layers[0].offset.x));
-		u_layer0Offset.y = uint32_t(int32_t(frameInfo->layers[0].offset.y));
+		u_layer0Offset.x = uint32_t(int32_t(frameInfo->layers.get( 0 ).offset.x));
+		u_layer0Offset.y = uint32_t(int32_t(frameInfo->layers.get( 0 ).offset.y));
 		u_borderMask = frameInfo->borderMask() >> 1u;
 		u_frameId = s_frameId++;
 		u_c1 = tmp.x;
 		u_shaderFilter = 0;
 		u_alphaMode = 0;
 
-		for (int i = 0; i < frameInfo->layerCount; i++)
+		for (int i = 0; i < frameInfo->layers.count(); i++)
 		{
-			const FrameInfo_t::Layer_t *layer = &frameInfo->layers[i];
+			const FrameInfo_t::Layer_t *layer = &frameInfo->layers.get( i );
 
             if (i == 0 || layer->isScreenSize() || (layer->filter == GamescopeUpscaleFilter::LINEAR && layer->viewConvertsToLinearAutomatically()))
                 u_shaderFilter |= ((uint32_t)GamescopeUpscaleFilter::FROM_VIEW) << (i * 4);
@@ -3912,7 +3912,7 @@ struct RcasPushData_t
 				};
 			}
 
-			u_opacity[i] = frameInfo->layers[i].opacity;
+			u_opacity[i] = frameInfo->layers.get( i ).opacity;
 		}
 
 		u_linearToNits = g_flInternalDisplayBrightnessNits;
@@ -3920,10 +3920,10 @@ struct RcasPushData_t
 		u_itmSdrNits = g_flHDRItmSdrNits;
 		u_itmTargetNits = g_flHDRItmTargetNits;
 
-		for (uint32_t i = 1; i < k_nMaxLayers; i++)
+		for (int i = 1; i < frameInfo->layers.count(); i++)
 		{
-			u_scale[i - 1] = frameInfo->layers[i].scale;
-			u_offset[i - 1] = frameInfo->layers[i].offsetPixelCenter();
+			u_scale[i - 1] = frameInfo->layers.get( i ).scale;
+			u_offset[i - 1] = frameInfo->layers.get( i ).offsetPixelCenter();
 		}
 	}
 };
@@ -3948,9 +3948,9 @@ struct NisPushData_t
 
 void bind_all_layers(CVulkanCmdBuffer* cmdBuffer, const struct FrameInfo_t *frameInfo)
 {
-	for ( int i = 0; i < frameInfo->layerCount; i++ )
+	for ( int i = 0; i < frameInfo->layers.count(); i++ )
 	{
-		const FrameInfo_t::Layer_t *layer = &frameInfo->layers[i];
+		const FrameInfo_t::Layer_t *layer = &frameInfo->layers.get( i );
 
 		bool nearest = layer->isScreenSize()
                     || layer->filter == GamescopeUpscaleFilter::NEAREST
@@ -3961,7 +3961,7 @@ void bind_all_layers(CVulkanCmdBuffer* cmdBuffer, const struct FrameInfo_t *fram
 		cmdBuffer->setSamplerNearest(i, nearest);
 		cmdBuffer->setSamplerUnnormalized(i, true);
 	}
-	for (uint32_t i = frameInfo->layerCount; i < VKR_SAMPLER_SLOTS; i++)
+	for (uint32_t i = frameInfo->layers.count(); i < VKR_SAMPLER_SLOTS; i++)
 	{
 		cmdBuffer->bindTexture(i, nullptr);
 	}
@@ -3978,7 +3978,7 @@ std::optional<uint64_t> vulkan_screenshot( const struct FrameInfo_t *frameInfo, 
 	for (uint32_t i = 0; i < EOTF_Count; i++)
 		cmdBuffer->bindColorMgmtLuts(i, frameInfo->shaperLut[i], frameInfo->lut3D[i]);
 
-	cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF ));
+	cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layers.count(), frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF ));
 	bind_all_layers(cmdBuffer.get(), frameInfo);
 	cmdBuffer->bindTarget(pScreenshotTexture);
 	cmdBuffer->uploadConstants<BlitPushData_t>(frameInfo);
@@ -4036,15 +4036,15 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 	g_pLastReshadeEffect = nullptr;
 	if (!g_reshade_effect.empty())
 	{
-		if (frameInfo->layers[0].tex)
+		if (frameInfo->layers.get( 0 ).tex)
 		{
 			ReshadeEffectKey key
 			{
 				.path             = g_reshade_effect,
-				.bufferWidth      = frameInfo->layers[0].tex->width(),
-				.bufferHeight     = frameInfo->layers[0].tex->height(),
-				.bufferColorSpace = frameInfo->layers[0].colorspace,
-				.bufferFormat     = frameInfo->layers[0].tex->format(),
+				.bufferWidth      = frameInfo->layers.get( 0 ).tex->width(),
+				.bufferHeight     = frameInfo->layers.get( 0 ).tex->height(),
+				.bufferColorSpace = frameInfo->layers.get( 0 ).colorspace,
+				.bufferFormat     = frameInfo->layers.get( 0 ).tex->format(),
 				.techniqueIdx     = g_reshade_technique_idx,
 			};
 
@@ -4053,7 +4053,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 
 			if (pipeline != nullptr)
 			{
-				uint64_t seq = pipeline->execute(frameInfo->layers[0].tex, &frameInfo->layers[0].tex);
+				uint64_t seq = pipeline->execute(frameInfo->layers.get( 0 ).tex, &frameInfo->layers.get( 0 ).tex);
 				g_device.wait(seq);
 			}
 		}
@@ -4079,17 +4079,17 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 
 	if ( frameInfo->useFSRLayer0 )
 	{
-		uint32_t inputX = frameInfo->layers[0].tex->width();
-		uint32_t inputY = frameInfo->layers[0].tex->height();
+		uint32_t inputX = frameInfo->layers.get( 0 ).tex->width();
+		uint32_t inputY = frameInfo->layers.get( 0 ).tex->height();
 
-		uint32_t tempX = frameInfo->layers[0].integerWidth();
-		uint32_t tempY = frameInfo->layers[0].integerHeight();
+		uint32_t tempX = frameInfo->layers.get( 0 ).integerWidth();
+		uint32_t tempY = frameInfo->layers.get( 0 ).integerHeight();
 
 		update_tmp_images(tempX, tempY);
 
 		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_EASU));
 		cmdBuffer->bindTarget(g_output.tmpOutput);
-		cmdBuffer->bindTexture(0, frameInfo->layers[0].tex);
+		cmdBuffer->bindTexture(0, frameInfo->layers.get( 0 ).tex);
 		cmdBuffer->setTextureSrgb(0, true);
 		cmdBuffer->setSamplerUnnormalized(0, false);
 		cmdBuffer->setSamplerNearest(0, false);
@@ -4099,7 +4099,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 
 		cmdBuffer->dispatch(div_roundup(tempX, pixelsPerGroup), div_roundup(tempY, pixelsPerGroup));
 
-		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layers.count(), frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF ));
 		bind_all_layers(cmdBuffer.get(), frameInfo);
 		cmdBuffer->bindTexture(0, g_output.tmpOutput);
 		cmdBuffer->setTextureSrgb(0, true);
@@ -4112,11 +4112,11 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 	}
 	else if ( frameInfo->useNISLayer0 )
 	{
-		uint32_t inputX = frameInfo->layers[0].tex->width();
-		uint32_t inputY = frameInfo->layers[0].tex->height();
+		uint32_t inputX = frameInfo->layers.get( 0 ).tex->width();
+		uint32_t inputY = frameInfo->layers.get( 0 ).tex->height();
 
-		uint32_t tempX = frameInfo->layers[0].integerWidth();
-		uint32_t tempY = frameInfo->layers[0].integerHeight();
+		uint32_t tempX = frameInfo->layers.get( 0 ).integerWidth();
+		uint32_t tempY = frameInfo->layers.get( 0 ).integerHeight();
 
 		update_tmp_images(tempX, tempY);
 
@@ -4124,7 +4124,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 
 		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_NIS));
 		cmdBuffer->bindTarget(g_output.tmpOutput);
-		cmdBuffer->bindTexture(0, frameInfo->layers[0].tex);
+		cmdBuffer->bindTexture(0, frameInfo->layers.get( 0 ).tex);
 		cmdBuffer->setTextureSrgb(0, true);
 		cmdBuffer->setSamplerUnnormalized(0, false);
 		cmdBuffer->setSamplerNearest(0, false);
@@ -4142,11 +4142,11 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 		cmdBuffer->dispatch(div_roundup(tempX, pixelsPerGroupX), div_roundup(tempY, pixelsPerGroupY));
 
 		struct FrameInfo_t nisFrameInfo = *frameInfo;
-		nisFrameInfo.layers[0].tex = g_output.tmpOutput;
-		nisFrameInfo.layers[0].scale.x = 1.0f;
-		nisFrameInfo.layers[0].scale.y = 1.0f;
+		nisFrameInfo.layers.get( 0 ).tex = g_output.tmpOutput;
+		nisFrameInfo.layers.get( 0 ).scale.x = 1.0f;
+		nisFrameInfo.layers.get( 0 ).scale.y = 1.0f;
 
-		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layers.count(), nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF ));
 		bind_all_layers(cmdBuffer.get(), &nisFrameInfo);
 		cmdBuffer->bindTarget(compositeImage);
 		cmdBuffer->uploadConstants<BlitPushData_t>(&nisFrameInfo, uOutputRotation);
@@ -4163,14 +4163,14 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 
 		uint32_t blur_layer_count = 1;
 		// Also blur the override on top if we have one.
-		if (frameInfo->layerCount >= 2 && frameInfo->layers[1].zpos == g_zposOverride)
+		if (frameInfo->layers.count() >= 2 && frameInfo->layers.get( 1 ).zpos == g_zposOverride)
 			blur_layer_count++;
 
 		cmdBuffer->bindPipeline(g_device.pipeline(type, blur_layer_count, frameInfo->ycbcrMask() & 0x3u, 0, frameInfo->colorspaceMask(), outputTF ));
 		cmdBuffer->bindTarget(g_output.tmpOutput);
 		for (uint32_t i = 0; i < blur_layer_count; i++)
 		{
-			cmdBuffer->bindTexture(i, frameInfo->layers[i].tex);
+			cmdBuffer->bindTexture(i, frameInfo->layers.get( i ).tex);
 			cmdBuffer->setTextureSrgb(i, false);
 			cmdBuffer->setSamplerUnnormalized(i, true);
 			cmdBuffer->setSamplerNearest(i, false);
@@ -4181,10 +4181,10 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 
 		cmdBuffer->dispatch(div_roundup(currentOutputWidth, pixelsPerGroup), div_roundup(currentOutputHeight, pixelsPerGroup));
 
-		bool useSrgbView = frameInfo->layers[0].colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR;
+		bool useSrgbView = frameInfo->layers.get( 0 ).colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR;
 
 		type = frameInfo->blurLayer0 == BLUR_MODE_COND ? SHADER_TYPE_BLUR_COND : SHADER_TYPE_BLUR;
-		cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layers.count(), frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF ));
 		bind_all_layers(cmdBuffer.get(), frameInfo);
 		cmdBuffer->bindTarget(compositeImage);
 		cmdBuffer->bindTexture(VKR_BLUR_EXTRA_SLOT, g_output.tmpOutput);
@@ -4196,7 +4196,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 	}
 	else
 	{
-		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layers.count(), frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF ));
 		bind_all_layers(cmdBuffer.get(), frameInfo);
 		cmdBuffer->bindTarget(compositeImage);
 		cmdBuffer->uploadConstants<BlitPushData_t>(frameInfo, uOutputRotation);

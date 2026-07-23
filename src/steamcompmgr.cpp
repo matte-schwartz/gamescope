@@ -1969,9 +1969,9 @@ void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, str
 	scaledX = scaledX - (m_hotspotX * cursor_scale);
 	scaledY = scaledY - (m_hotspotY * cursor_scale);
 
-	int curLayer = frameInfo->layerCount++;
-
-	FrameInfo_t::Layer_t *layer = &frameInfo->layers[ curLayer ];
+	FrameInfo_t::Layer_t *layer = frameInfo->layers.push();
+	if ( !layer )
+		return;
 
 	layer->opacity = 1.0;
 
@@ -2029,9 +2029,9 @@ std::array< BaseLayerInfo_t, HELD_COMMIT_COUNT > g_CachedPlanes = {};
 static void
 paint_cached_base_layer(const gamescope::Rc<commit_t>& commit, const BaseLayerInfo_t& base, struct FrameInfo_t *frameInfo, float flOpacityScale, bool bOverrideOpacity )
 {
-	int curLayer = frameInfo->layerCount++;
-
-	FrameInfo_t::Layer_t *layer = &frameInfo->layers[ curLayer ];
+	FrameInfo_t::Layer_t *layer = frameInfo->layers.push();
+	if ( !layer )
+		return;
 
 	layer->scale.x = base.scale[0];
 	layer->scale.y = base.scale[1];
@@ -2111,9 +2111,9 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
 	// Base plane will stay as tex=0 if we don't have contents yet, which will
 	// make us fall back to compositing and use the Vulkan null texture
 
-	int curLayer = frameInfo->layerCount++;
-
-	FrameInfo_t::Layer_t *layer = &frameInfo->layers[ curLayer ];
+	FrameInfo_t::Layer_t *layer = frameInfo->layers.push();
+	if ( !layer )
+		return nullptr;
 
 	layer->filter = ( flags & PaintWindowFlag::NoFilter ) ? GamescopeUpscaleFilter::LINEAR : g_upscaleFilter;
 
@@ -2299,13 +2299,13 @@ static bool is_fading_out()
 
 static void update_touch_scaling( const struct FrameInfo_t *frameInfo )
 {
-	if ( !frameInfo->layerCount )
+	if ( !frameInfo->layers.count() )
 		return;
 
-	focusedWindowScaleX = frameInfo->layers[ frameInfo->layerCount - 1 ].scale.x;
-	focusedWindowScaleY = frameInfo->layers[ frameInfo->layerCount - 1 ].scale.y;
-	focusedWindowOffsetX = frameInfo->layers[ frameInfo->layerCount - 1 ].offset.x;
-	focusedWindowOffsetY = frameInfo->layers[ frameInfo->layerCount - 1 ].offset.y;
+	focusedWindowScaleX = frameInfo->layers.get( frameInfo->layers.count() - 1 ).scale.x;
+	focusedWindowScaleY = frameInfo->layers.get( frameInfo->layers.count() - 1 ).scale.y;
+	focusedWindowOffsetX = frameInfo->layers.get( frameInfo->layers.count() - 1 ).offset.x;
+	focusedWindowOffsetY = frameInfo->layers.get( frameInfo->layers.count() - 1 ).offset.y;
 }
 
 #if HAVE_PIPEWIRE
@@ -2584,7 +2584,7 @@ paint_all( global_focus_t *pFocus, bool async )
 					}
 				}
 				
-				int nOldLayerCount = frameInfo.layerCount;
+				int nOldLayerCount = frameInfo.layers.count();
 
 				uint32_t flags = 0;
 				if ( !bHasVideoUnderlay )
@@ -2595,8 +2595,8 @@ paint_all( global_focus_t *pFocus, bool async )
 				
 				// paint UI unless it's fully hidden, which it communicates to us through opacity=0
 				// we paint it to extract scaling coefficients above, then remove the layer if one was added
-				if ( w->opacity == TRANSLUCENT && bHasVideoUnderlay && nOldLayerCount < frameInfo.layerCount )
-					frameInfo.layerCount--;
+				if ( w->opacity == TRANSLUCENT && bHasVideoUnderlay && nOldLayerCount < frameInfo.layers.count() )
+					frameInfo.layers.pop();
 			}
 			else
 			{
@@ -2623,7 +2623,7 @@ paint_all( global_focus_t *pFocus, bool async )
 					// Just draw focused window as normal, be it Steam or the game
 					paint_window(w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, override);
 
-					bool needsScaling = frameInfo.layers[0].scale.x < 0.999f && frameInfo.layers[0].scale.y < 0.999f;
+					bool needsScaling = frameInfo.layers.get( 0 ).scale.x < 0.999f && frameInfo.layers.get( 0 ).scale.y < 0.999f;
 					frameInfo.useFSRLayer0 = g_upscaleFilter == GamescopeUpscaleFilter::FSR && needsScaling;
 					frameInfo.useNISLayer0 = g_upscaleFilter == GamescopeUpscaleFilter::NIS && needsScaling;
 				}
@@ -2659,9 +2659,8 @@ paint_all( global_focus_t *pFocus, bool async )
 		// wlserver_mousefocus window.
 		//update_touch_scaling( &frameInfo );
 	}
-
 	// If we have any layers that aren't a cursor or overlay, then we have valid contents for presentation.
-	const bool bValidContents = frameInfo.layerCount > 0;
+	const bool bValidContents = frameInfo.layers.count() > 0;
 
   	if (externalOverlay && cv_paint_external_overlay_plane )
 	{
@@ -2688,13 +2687,12 @@ paint_all( global_focus_t *pFocus, bool async )
 		else if ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() )
 		{
 			auto tex = vulkan_get_hacky_blank_texture();
-			if ( tex != nullptr )
+			if ( tex != nullptr && frameInfo.layers.count() < k_nMaxLayers )
 			{
 				// HACK! HACK HACK HACK
 				// To avoid stutter when toggling the overlay on 
-				int curLayer = frameInfo.layerCount++;
-
-				FrameInfo_t::Layer_t *layer = &frameInfo.layers[ curLayer ];
+				FrameInfo_t::Layer_t *layer = frameInfo.layers.push();
+				assert( layer );
 
 
 				layer->scale.x = g_nOutputWidth == tex->width() ? 1.0f : tex->width() / (float)g_nOutputWidth;
@@ -2748,7 +2746,7 @@ paint_all( global_focus_t *pFocus, bool async )
 	bool blurFading = blurFadeTime < g_BlurFadeDuration;
 	BlurMode currentBlurMode = blurFading ? std::max(g_BlurMode, g_BlurModeOld) : g_BlurMode;
 
-	if (currentBlurMode && !(frameInfo.layerCount <= 1 && currentBlurMode == BLUR_MODE_COND))
+	if (currentBlurMode && !(frameInfo.layers.count() <= 1 && currentBlurMode == BLUR_MODE_COND))
 	{
 		frameInfo.blurLayer0 = currentBlurMode;
 		frameInfo.blurRadius = g_BlurRadius;
@@ -2808,13 +2806,12 @@ paint_all( global_focus_t *pFocus, bool async )
 		}
 	}
 
-	bool bDoMuraCompensation = is_mura_correction_enabled() && frameInfo.layerCount && cv_paint_mura_plane;
+	bool bDoMuraCompensation = is_mura_correction_enabled() && frameInfo.layers.count() && frameInfo.layers.count() < k_nMaxLayers && cv_paint_mura_plane;
 	if ( bDoMuraCompensation )
 	{
 		auto& MuraCorrectionImage = s_MuraCorrectionImage[GetBackend()->GetScreenType()];
-		int curLayer = frameInfo.layerCount++;
-
-		FrameInfo_t::Layer_t *layer = &frameInfo.layers[ curLayer ];
+		FrameInfo_t::Layer_t *layer = frameInfo.layers.push();
+		assert( layer );
 
 		layer->applyColorMgmt = false;
 		layer->scale = vec2_t{ 1.0f, 1.0f };
@@ -2888,8 +2885,8 @@ paint_all( global_focus_t *pFocus, bool async )
 		if ( pScreenshotTexture )
 		{
 			bool bHDRScreenshot = path.extension() == ".avif" &&
-								  frameInfo.layerCount > 0 &&
-								  ColorspaceIsHDR( frameInfo.layers[0].colorspace ) &&
+								  frameInfo.layers.count() > 0 &&
+								  ColorspaceIsHDR( frameInfo.layers.get( 0 ).colorspace ) &&
 								  oScreenshotInfo->eScreenshotType != GAMESCOPE_CONTROL_SCREENSHOT_TYPE_SCREEN_BUFFER;
 
 			if ( drmCaptureFormat == DRM_FORMAT_NV12 || oScreenshotInfo->eScreenshotType != GAMESCOPE_CONTROL_SCREENSHOT_TYPE_SCREEN_BUFFER )
@@ -2905,11 +2902,11 @@ paint_all( global_focus_t *pFocus, bool async )
 				if ( oScreenshotInfo->eScreenshotType == GAMESCOPE_CONTROL_SCREENSHOT_TYPE_BASE_PLANE_ONLY )
 				{
 					// Remove everything but base planes from the screenshot.
-					for (int i = 0; i < frameInfo.layerCount; i++)
+					for (int i = 0; i < frameInfo.layers.count(); i++)
 					{
-						if (frameInfo.layers[i].zpos >= (int)g_zposExternalOverlay)
+						if (frameInfo.layers.get( i ).zpos >= (int)g_zposExternalOverlay)
 						{
-							frameInfo.layerCount = i;
+							frameInfo.layers.truncate( i );
 							break;
 						}
 					}
@@ -2919,11 +2916,11 @@ paint_all( global_focus_t *pFocus, bool async )
 					if ( is_mura_correction_enabled() )
 					{
 						// Remove the last layer which is for mura...
-						for (int i = 0; i < frameInfo.layerCount; i++)
+						for (int i = 0; i < frameInfo.layers.count(); i++)
 						{
-							if (frameInfo.layers[i].zpos >= (int)g_zposMuraCorrection)
+							if (frameInfo.layers.get( i ).zpos >= (int)g_zposMuraCorrection)
 							{
-								frameInfo.layerCount = i;
+								frameInfo.layers.truncate( i );
 								break;
 							}
 						}
@@ -3222,7 +3219,7 @@ paint_all( global_focus_t *pFocus, bool async )
 
 
 	gpuvis_trace_end_ctx_printf( paintID, "paint_all" );
-	gpuvis_trace_printf( "paint_all %i layers", (int)frameInfo.layerCount );
+	gpuvis_trace_printf( "paint_all %i layers", (int)frameInfo.layers.count() );
 }
 
 /* Get prop from window
