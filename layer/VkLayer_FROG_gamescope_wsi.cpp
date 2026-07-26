@@ -1208,8 +1208,15 @@ namespace GamescopeWSILayer {
           gamescopeSwapchain->retired = true;
           // If we are going to/from being able to bypass XWayland, make sure
           // we NULL out oldSwapchain, as they'll be for different surfaces and swapchain types.
-          if (gamescopeSwapchain->isBypassingXWayland != canBypass)
+          if (gamescopeSwapchain->isBypassingXWayland != canBypass) {
             swapchainInfo.oldSwapchain = VK_NULL_HANDLE;
+            // Frames drawn during the flip transition went to the retired
+            // swapchain, ask for a repaint so a fresh frame lands on the
+            // replacement. Only needed when bypass was lost, on gain the
+            // XWayland content stays valid until the first flip.
+            if (!canBypass && !gamescopeSurface->isWayland())
+              xcb::forceRedraw(gamescopeSurface->connection, gamescopeSurface->window);
+          }
         }
       }
 
@@ -1568,7 +1575,14 @@ namespace GamescopeWSILayer {
               if (!(gamescopeSurface->flags & GamescopeLayerClient::Flag::NoSuboptimal))
                 UpdateSwapchainResult(VK_SUBOPTIMAL_KHR);
             } else {
-              UpdateSwapchainResult(VK_ERROR_OUT_OF_DATE_KHR);  
+              // zink ignores present results, so retire as well: the next
+              // acquire fails with OUT_OF_DATE, which every client handles.
+              gamescopeSwapchain->retired = true;
+              // This frame went to the bypass path we just lost, so ask for
+              // a repaint to trigger the recreation.
+              if (!gamescopeSurface->isWayland())
+                xcb::forceRedraw(gamescopeSurface->connection, gamescopeSurface->window);
+              UpdateSwapchainResult(VK_ERROR_OUT_OF_DATE_KHR);
             }
           }
 
