@@ -529,6 +529,18 @@ namespace GamescopeWSILayer {
         return false;
       }
 
+      // Sibling subtrees within the same toplevel can hold content that is
+      // presented alongside us through XWayland: CEF (steamwebhelper) renders
+      // Steam's GamepadUI side menus into siblings of the browser's GL window.
+      // Bypassing overrides the whole toplevel with just our buffer, dropping
+      // that content from presentation, so refuse if such a sibling exists.
+      if (auto sibling = xcb::findLargestObscuringSibling(connection, window, *toplevelWindow)) {
+        if (bypassDebugEnabled())
+          fprintf(stderr, "[Gamescope WSI] Not bypassing: sibling window 0x%x overlaps window 0x%x by %ux%u.\n",
+            sibling->window, window, sibling->overlap.width, sibling->overlap.height);
+        return false;
+      }
+
       // If this window is not within 2px margin of error for the size of
       // it's top level window, then it cannot be flipped.
       //
