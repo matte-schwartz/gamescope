@@ -741,13 +741,19 @@ static void gamescope_swapchain_destroy_co( struct wl_resource *resource );
 
 void gamescope_xwayland_server_t::handle_override_window_content( struct wl_client *client, struct wl_resource *gamescope_swapchain_resource, struct wlr_surface *surface, uint32_t x11_window )
 {
+#ifdef GAMESCOPE_SWAPCHAIN_DEBUG
+	const uint32_t requested_x11_window = x11_window;
+#endif
 	wlserver_x11_surface_info *x11_surface = lookup_x11_surface_info_from_xid( this, x11_window );
 	// If we found an x11_surface, go back up to our parent.
 	if ( x11_surface )
 		x11_window = x11_surface->x11_id;
 
 #ifdef GAMESCOPE_SWAPCHAIN_DEBUG
-	wl_log.infof( "handle_override_window_content: (1) x11_window: 0x%x swapchain_resource: %p surface: %p", x11_window, gamescope_swapchain_resource, surface );
+	wl_log.infof( "handle_override_window_content: (1) x11_window: 0x%x (requested: 0x%x%s) swapchain_resource: %p surface: %p",
+		x11_window, requested_x11_window,
+		x11_window != requested_x11_window ? ", REMAPPED to parent" : "",
+		gamescope_swapchain_resource, surface );
 #endif
 
 	if ( content_overrides.count( x11_window ) ) {

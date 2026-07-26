@@ -147,6 +147,13 @@ namespace GamescopeWSILayer {
     return false;
   }
 
+  // Set GAMESCOPE_WSI_BYPASS_DEBUG=1 to trace why a window does or doesn't
+  // take the XWayland bypass path.
+  static bool bypassDebugEnabled() {
+    static const bool s_enabled = parseEnv<bool>("GAMESCOPE_WSI_BYPASS_DEBUG").value_or(false);
+    return s_enabled;
+  }
+
   static uint32_t getMinImageCount() {
     static uint32_t s_minImageCount = []() -> uint32_t {
       if (auto minCount = parseEnv<uint32_t>("GAMESCOPE_WSI_MIN_IMAGE_COUNT")) {
@@ -414,6 +421,10 @@ namespace GamescopeWSILayer {
     // Cached for comparison.
     std::optional<VkRect2D> cachedWindowRect;
 
+    // Last bypass verdict, indexed by hdrColorspace, so the debug trace only
+    // fires when it actually changes instead of once per present.
+    std::optional<bool> lastBypassVerdict[2];
+
     bool isWayland() const {
       // Is native Wayland?
       return connection == nullptr;
@@ -429,6 +440,29 @@ namespace GamescopeWSILayer {
     }
 
     bool canBypassXWayland(bool hdrColorspace = false) {
+      const bool result = canBypassXWaylandInternal(hdrColorspace);
+
+      if (bypassDebugEnabled()) {
+        auto &last = lastBypassVerdict[hdrColorspace ? 1 : 0];
+        if (last != result) {
+          auto parent = xcb::getParentWindow(connection, window);
+          auto toplevel = xcb::getToplevelWindow(connection, window);
+          fprintf(stderr, "[Gamescope WSI] Bypass verdict for window 0x%x (hdr: %d): %s"
+                          " [rect: %dx%d+%d+%d parent: 0x%x toplevel: 0x%x]\n",
+            window, hdrColorspace ? 1 : 0, result ? "BYPASS" : "xwayland",
+            cachedWindowRect ? cachedWindowRect->extent.width  : 0,
+            cachedWindowRect ? cachedWindowRect->extent.height : 0,
+            cachedWindowRect ? cachedWindowRect->offset.x : 0,
+            cachedWindowRect ? cachedWindowRect->offset.y : 0,
+            parent ? *parent : 0, toplevel ? *toplevel : 0);
+          last = result;
+        }
+      }
+
+      return result;
+    }
+
+    bool canBypassXWaylandInternal(bool hdrColorspace) {
       if (isWayland())
         return true;
 
@@ -450,9 +484,8 @@ namespace GamescopeWSILayer {
         auto allowFlip = xcb::getPropertyValue<uint32_t>(connection, window, "_WINE_ALLOW_FLIP");
         if (allowFlip) {
           if (*allowFlip == 0) {
-#if GAMESCOPE_WSI_BYPASS_DEBUG
-            fprintf(stderr, "[Gamescope WSI] Not bypassing: _WINE_ALLOW_FLIP is 0 for window 0x%x.\n", window);
-#endif
+            if (bypassDebugEnabled())
+              fprintf(stderr, "[Gamescope WSI] Not bypassing: _WINE_ALLOW_FLIP is 0 for window 0x%x.\n", window);
             return false;
           }
         } else if (auto parent = xcb::getParentWindow(connection, window)) {
@@ -460,9 +493,8 @@ namespace GamescopeWSILayer {
           if (parentRect && parentRect->extent.width == 1 && parentRect->extent.height == 1 &&
               xcb::isOverrideRedirect(connection, *parent) &&
               !xcb::hasProperty(connection, *parent, XCB_ATOM_WM_CLASS)) {
-#if GAMESCOPE_WSI_BYPASS_DEBUG
-            fprintf(stderr, "[Gamescope WSI] Not bypassing: window 0x%x is parked under Wine dummy parent 0x%x.\n", window, *parent);
-#endif
+            if (bypassDebugEnabled())
+              fprintf(stderr, "[Gamescope WSI] Not bypassing: window 0x%x is parked under Wine dummy parent 0x%x.\n", window, *parent);
             return false;
           }
         }
@@ -492,9 +524,8 @@ namespace GamescopeWSILayer {
       // then we cannot flip.
       // (There can be dummy composite redirect windows and whatever.)
       if (largestObscuringWindowSize->width > 1 || largestObscuringWindowSize->height > 1) {
-#if GAMESCOPE_WSI_BYPASS_DEBUG
-        fprintf(stderr, "[Gamescope WSI] Largest obscuring window size: %u %u\n", largestObscuringWindowSize->width, largestObscuringWindowSize->height);
-#endif
+        if (bypassDebugEnabled())
+          fprintf(stderr, "[Gamescope WSI] Largest obscuring window size: %u %u\n", largestObscuringWindowSize->width, largestObscuringWindowSize->height);
         return false;
       }
 
@@ -512,12 +543,11 @@ namespace GamescopeWSILayer {
             iabs(rect->offset.y) > 1 ||
             iabs(int32_t(toplevelRect->extent.width)  - int32_t(rect->extent.width)) > 2 ||
             iabs(int32_t(toplevelRect->extent.height) - int32_t(rect->extent.height)) > 2) {
-  #if GAMESCOPE_WSI_BYPASS_DEBUG
-          fprintf(stderr, "[Gamescope WSI] Not within 1px margin of error. Offset: %d %d Extent: %u %u vs %u %u\n",
-            rect->offset.x, rect->offset.y,
-            toplevelRect->extent.width, toplevelRect->extent.height,
-            rect->extent.width, rect->extent.height);
-  #endif
+          if (bypassDebugEnabled())
+            fprintf(stderr, "[Gamescope WSI] Not within 1px margin of error. Offset: %d %d Extent: %u %u vs %u %u\n",
+              rect->offset.x, rect->offset.y,
+              toplevelRect->extent.width, toplevelRect->extent.height,
+              rect->extent.width, rect->extent.height);
           return false;
         }
       }
