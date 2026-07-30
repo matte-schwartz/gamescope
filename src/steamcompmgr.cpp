@@ -4019,6 +4019,20 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 		ctx->focus.focusWindow->nudged = true;
 	}
 
+	// X confines the pointer to the screen, so a screen-sized focus window only
+	// sees all of it at the origin. Place it there once, a client that moves it
+	// afterwards keeps its position. Oversized windows stay put, clients centre
+	// those to keep the middle reachable.
+	const Rect rect = w->GetGeometry();
+
+	if ( !w->placed && rect.nWidth == ctx->root_width && rect.nHeight == ctx->root_height )
+	{
+		if ( rect.nX != 0 || rect.nY != 0 )
+			XMoveWindow(ctx->dpy, w->xwayland().id, 0, 0);
+
+		w->placed = true;
+	}
+
 	if ( win_has_game_id( w ) )
 	{
 		if ( window_is_fullscreen( ctx->focus.focusWindow ) || ctx->force_windows_fullscreen )
@@ -5205,6 +5219,7 @@ add_win(xwayland_ctx_t *ctx, Window id, Window prev, unsigned long sequence)
 	new_win->requestedWidth = 0;
 	new_win->requestedHeight = 0;
 	new_win->nudged = false;
+	new_win->placed = false;
 	new_win->ignoreOverrideRedirect = false;
 
 	wlserver_x11_surface_info_init( &new_win->xwayland().surface, ctx->xwayland_server, id );
@@ -5269,6 +5284,10 @@ configure_win(xwayland_ctx_t *ctx, XConfigureEvent *ce)
 			ctx->root_height = ce->height;
 			MakeFocusDirty();
 
+			// Screen-sized is relative to the screen, re-arm every placement.
+			for ( steamcompmgr_win_t *pWindow = ctx->list; pWindow; pWindow = pWindow->xwayland().next )
+				pWindow->placed = false;
+
 			gamescope_xwayland_server_t *root_server = wlserver_get_xwayland_server(0);
 			xwayland_ctx_t *root_ctx = root_server->ctx.get();
 			XDeleteProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeXWaylandModeControl );
@@ -5276,6 +5295,11 @@ configure_win(xwayland_ctx_t *ctx, XConfigureEvent *ce)
 		}
 		return;
 	}
+
+	// Resizing re-arms the placement. Moving does not, so we never fight a
+	// client that drags its window off.
+	if ( ce->width != w->xwayland().a.width || ce->height != w->xwayland().a.height )
+		w->placed = false;
 
 	w->xwayland().a.x = ce->x;
 	w->xwayland().a.y = ce->y;
