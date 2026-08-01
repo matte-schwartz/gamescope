@@ -66,7 +66,7 @@ void compositing_debug(uvec2 coord) {
             if (time.x + time.y + time.z + time.w < 2.0f)
                 value = vec4(0.0f, 0.0f, 0.0f, 1.0f);
         }
-        imageStore(dst, ivec2(coord), value);
+        store_output(ivec2(coord), value);
     }
 }
 

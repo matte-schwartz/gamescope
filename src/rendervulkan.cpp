@@ -1091,9 +1091,9 @@ VkSampler CVulkanDevice::sampler( SamplerState key )
 	return ret;
 }
 
-VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, bool itm_enable)
+VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, bool itm_enable, bool output_swap_rb)
 {
-	const std::array<VkSpecializationMapEntry, 7> specializationEntries = {{
+	const std::array<VkSpecializationMapEntry, 8> specializationEntries = {{
 		{
 			.constantID = 0,
 			.offset     = sizeof(uint32_t) * 0,
@@ -1131,6 +1131,12 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
 			.offset     = sizeof(uint32_t) * 6,
 			.size       = sizeof(uint32_t)
 		},
+
+		{
+			.constantID = 8,
+			.offset     = sizeof(uint32_t) * 7,
+			.size       = sizeof(uint32_t)
+		},
 	}};
 
 	struct {
@@ -1141,6 +1147,7 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
 		uint32_t colorspace_mask;
 		uint32_t output_eotf;
 		uint32_t itm_enable;
+		uint32_t output_swap_rb;
 	} specializationData = {
 		.layerCount   = layerCount,
 		.ycbcrMask    = ycbcrMask,
@@ -1149,6 +1156,7 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
 		.colorspace_mask = colorspace_mask,
 		.output_eotf = output_eotf,
 		.itm_enable = itm_enable,
+		.output_swap_rb = output_swap_rb,
 	};
 
 	VkSpecializationInfo specializationInfo = {
@@ -1206,7 +1214,7 @@ void CVulkanDevice::compileAllPipelines(std::stop_token st)
 					if (blur_layers > layerCount)
 						continue;
 
-					VkPipeline newPipeline = compilePipeline(layerCount, ycbcrMask, info.shaderType, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.itmEnable);
+					VkPipeline newPipeline = compilePipeline(layerCount, ycbcrMask, info.shaderType, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.itmEnable, false);
 					{
 						std::lock_guard<std::mutex> lock(m_pipelineMutex);
 						PipelineInfo_t key = {info.shaderType, layerCount, ycbcrMask, blur_layers, info.compositeDebug};
@@ -1223,18 +1231,18 @@ void CVulkanDevice::compileAllPipelines(std::stop_token st)
 
 extern bool g_bSteamIsActiveWindow;
 
-VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, bool itm_enable)
+VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, bool itm_enable, bool output_swap_rb)
 {
 	uint32_t effective_debug = g_uCompositeDebug;
 	if ( g_bSteamIsActiveWindow )
 		effective_debug &= ~(CompositeDebugFlag::Heatmap | CompositeDebugFlag::Heatmap_MSWCG | CompositeDebugFlag::Heatmap_Hard);
 
 	std::lock_guard<std::mutex> lock(m_pipelineMutex);
-	PipelineInfo_t key = {type, layerCount, ycbcrMask, blur_layers, effective_debug, colorspace_mask, output_eotf, itm_enable};
+	PipelineInfo_t key = {type, layerCount, ycbcrMask, blur_layers, effective_debug, colorspace_mask, output_eotf, itm_enable, output_swap_rb};
 	auto search = m_pipelineMap.find(key);
 	if (search == m_pipelineMap.end())
 	{
-		VkPipeline result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, itm_enable);
+		VkPipeline result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, itm_enable, output_swap_rb);
 		m_pipelineMap[key] = result;
 		return result;
 	}
@@ -1771,7 +1779,7 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 
 	if (!m_target->isYcbcr())
 	{
-		targetDescriptors[0].imageView = m_target->srgbView();
+		targetDescriptors[0].imageView = m_target->storageView();
 		targetDescriptors[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
 	else
@@ -2595,7 +2603,7 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
 	return true;
 }
 
-bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t height, VkFormat format )
+bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t height, VkFormat format, bool bSwapRBStorage )
 {
 	m_drmFormat = VulkanFormatToDRM( format );
 	m_vkImage = image;
@@ -2608,8 +2616,15 @@ bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t
 	m_contentHeight = height;
 	m_bOutputImage = true;
 
+	VkImageViewUsageCreateInfo viewUsageInfo = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+		.usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+	};
+
 	VkImageViewCreateInfo createInfo = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		// The native-format view can't carry the storage usage the R/B-swapped view exists for.
+		.pNext = bSwapRBStorage ? &viewUsageInfo : nullptr,
 		.image = image,
 		.viewType = VK_IMAGE_VIEW_TYPE_2D,
 		.format = ToLinearVulkanFormat( format ),
@@ -2632,11 +2647,6 @@ bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t
 		return false;
 	}
 
-	VkImageViewUsageCreateInfo viewUsageInfo = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
-		.usage = VK_IMAGE_USAGE_SAMPLED_BIT,
-	};
-
 	createInfo.pNext = &viewUsageInfo;
 	createInfo.format = ToSrgbVulkanFormat( format );
 
@@ -2644,6 +2654,20 @@ bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t
 	if ( res != VK_SUCCESS ) {
 		vk_errorf( res, "vkCreateImageView failed" );
 		return false;
+	}
+
+	if ( bSwapRBStorage )
+	{
+		// The driver can't store this format directly, write through a R/B-swapped
+		// view instead. The shaders swap the channels back at store time.
+		viewUsageInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+		createInfo.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+
+		res = g_device.vk.CreateImageView(g_device.device(), &createInfo, nullptr, &m_storageView);
+		if ( res != VK_SUCCESS ) {
+			vk_errorf( res, "vkCreateImageView failed" );
+			return false;
+		}
 	}
 
 	m_bInitialized = true;
@@ -2705,6 +2729,12 @@ CVulkanTexture::~CVulkanTexture( void )
 	{
 		g_device.vk.DestroyImageView( g_device.device(), m_linearView, nullptr );
 		m_linearView = VK_NULL_HANDLE;
+	}
+
+	if ( m_storageView != VK_NULL_HANDLE )
+	{
+		g_device.vk.DestroyImageView( g_device.device(), m_storageView, nullptr );
+		m_storageView = VK_NULL_HANDLE;
 	}
 
 	if ( m_pBackendFb != nullptr )
@@ -3154,14 +3184,23 @@ extern bool g_bOutputHDREnabled;
 
 // Not every surface format supports the usage our compute shaders need,
 // e.g. NVIDIA hardware can't do storage images on A2R10G10B10.
-static bool vulkan_swapchain_format_supports_usage( VkFormat format, VkImageUsageFlags usage )
+static bool vulkan_swapchain_format_supports_usage( VkFormat format, VkImageUsageFlags usage, const VkFormat *pViewFormats = nullptr, uint32_t uViewFormatCount = 0 )
 {
+	VkImageFormatListCreateInfo formatList = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+		.viewFormatCount = uViewFormatCount,
+		.pViewFormats = pViewFormats,
+	};
 	VkPhysicalDeviceImageFormatInfo2 imageFormatInfo = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+		.pNext = uViewFormatCount ? &formatList : nullptr,
 		.format = format,
 		.type = VK_IMAGE_TYPE_2D,
 		.tiling = VK_IMAGE_TILING_OPTIMAL,
 		.usage = usage,
+		// Match what a mutable-format swapchain makes, the usage only has to be
+		// supported by one of the view formats.
+		.flags = uViewFormatCount ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT : 0u,
 	};
 	VkImageFormatProperties2 imageFormatProps = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
@@ -3184,10 +3223,26 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 		VK_FORMAT_B8G8R8A8_UNORM,
 	};
 
+	static constexpr VkFormat k_swapRBViewFormats[] =
+	{
+		VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+		VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+	};
+
+	bool bSwapRBStorage = false;
 	for ( VkFormat preferredFormat : preferredFormats )
 	{
+		bool bFormatSwapsRB = false;
 		if ( !vulkan_swapchain_format_supports_usage( preferredFormat, uSwapchainUsage ) )
-			continue;
+		{
+			// A2R10G10B10 gets a second chance through a mutable swapchain with a
+			// R/B-swapped A2B10G10R10 storage view, still better than 8-bit.
+			if ( preferredFormat != VK_FORMAT_A2R10G10B10_UNORM_PACK32 ||
+				 !vulkan_swapchain_format_supports_usage( preferredFormat, uSwapchainUsage, k_swapRBViewFormats, std::size( k_swapRBViewFormats ) ) )
+				continue;
+
+			bFormatSwapsRB = true;
+		}
 
 		for ( surfaceFormat = 0; surfaceFormat < formatCount; surfaceFormat++ )
 		{
@@ -3197,7 +3252,10 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 		}
 
 		if ( surfaceFormat != formatCount )
+		{
+			bSwapRBStorage = bFormatSwapsRB;
 			break;
+		}
 	}
 
 	if ( surfaceFormat == formatCount )
@@ -3205,12 +3263,14 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 
 	VkFormat eVkFormat = pOutput->surfaceFormats[ surfaceFormat ].format;
 	pOutput->uOutputFormat = VulkanFormatToDRM( pOutput->surfaceFormats[ surfaceFormat ].format );
-	
+
 	VkFormat formats[2] =
 	{
 		ToSrgbVulkanFormat( eVkFormat ),
 		ToLinearVulkanFormat( eVkFormat ),
 	};
+	if ( bSwapRBStorage )
+		formats[1] = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 
 	VkImageFormatListCreateInfo usageListInfo = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
@@ -3218,7 +3278,7 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 		.pViewFormats = formats,
 	};
 
-	vk_log.infof("Creating Gamescope nested swapchain with format %u and colorspace %u", eVkFormat, pOutput->surfaceFormats[surfaceFormat].colorSpace);
+	vk_log.infof("Creating Gamescope nested swapchain with format %u and colorspace %u%s", eVkFormat, pOutput->surfaceFormats[surfaceFormat].colorSpace, bSwapRBStorage ? " (R/B-swapped storage)" : "");
 
 	VkSwapchainCreateInfoKHR createInfo = {
 		.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -3255,7 +3315,7 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 	{
 		pOutput->outputImages[i] = new CVulkanTexture();
 
-		if ( !pOutput->outputImages[i]->BInitFromSwapchain(swapchainImages[i], g_nOutputWidth, g_nOutputHeight, eVkFormat))
+		if ( !pOutput->outputImages[i]->BInitFromSwapchain(swapchainImages[i], g_nOutputWidth, g_nOutputHeight, eVkFormat, bSwapRBStorage))
 			return false;
 	}
 
@@ -4074,7 +4134,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 
 		cmdBuffer->dispatch(div_roundup(tempX, pixelsPerGroup), div_roundup(tempY, pixelsPerGroup));
 
-		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF, false, compositeImage->bStorageSwapsRB() ));
 		bind_all_layers(cmdBuffer.get(), frameInfo);
 		cmdBuffer->bindTexture(0, g_output.tmpOutput);
 		cmdBuffer->setTextureSrgb(0, true);
@@ -4121,7 +4181,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 		nisFrameInfo.layers[0].scale.x = 1.0f;
 		nisFrameInfo.layers[0].scale.y = 1.0f;
 
-		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF, false, compositeImage->bStorageSwapsRB() ));
 		bind_all_layers(cmdBuffer.get(), &nisFrameInfo);
 		cmdBuffer->bindTarget(compositeImage);
 		cmdBuffer->uploadConstants<BlitPushData_t>(&nisFrameInfo);
@@ -4159,7 +4219,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 		bool useSrgbView = frameInfo->layers[0].colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR;
 
 		type = frameInfo->blurLayer0 == BLUR_MODE_COND ? SHADER_TYPE_BLUR_COND : SHADER_TYPE_BLUR;
-		cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF, false, compositeImage->bStorageSwapsRB() ));
 		bind_all_layers(cmdBuffer.get(), frameInfo);
 		cmdBuffer->bindTarget(compositeImage);
 		cmdBuffer->bindTexture(VKR_BLUR_EXTRA_SLOT, g_output.tmpOutput);
@@ -4171,7 +4231,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 	}
 	else
 	{
-		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF ));
+		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, false, compositeImage->bStorageSwapsRB() ));
 		bind_all_layers(cmdBuffer.get(), frameInfo);
 		cmdBuffer->bindTarget(compositeImage);
 		cmdBuffer->uploadConstants<BlitPushData_t>(frameInfo);
