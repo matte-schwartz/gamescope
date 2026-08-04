@@ -2339,6 +2339,10 @@ namespace gamescope
 				// m_szModel is 16 bytes.
 				const char *pszModel = di_edid_display_descriptor_get_string( pDesc );
 				strncpy( m_Mutable.szModel, pszModel, sizeof( m_Mutable.szModel ) );
+				// EDID pads product names with trailing spaces, trim them so scripts can match on model.
+				size_t nLen = strlen( m_Mutable.szModel );
+				while ( nLen > 0 && m_Mutable.szModel[ nLen - 1 ] == ' ' )
+					m_Mutable.szModel[ --nLen ] = '\0';
 			}
 			else if ( eTag == DI_EDID_DISPLAY_DESCRIPTOR_DATA_STRING )
 			{
