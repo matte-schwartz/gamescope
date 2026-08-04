@@ -426,7 +426,14 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
 
 			// Emulated backlight for panels whose hardware backlight dies in PQ. SDR keeps the hardware backlight.
 			if ( newColorMgmt.outputEncodingEOTF == EOTF_PQ )
-				flGain *= newColorMgmt.flBacklightGain;
+			{
+				tonemapping.flBacklightGain = newColorMgmt.flBacklightGain;
+				// Steepen the tone curve as the emulated backlight drops, like panel-side dimming does.
+				tonemapping.flBacklightGamma = 1.f + newColorMgmt.flBacklightDimContrast * ( 1.f - newColorMgmt.flBacklightGain );
+				tonemapping.flBacklightRefNits = std::max( 1.f, inputEOTF == EOTF_Gamma22
+					? newColorMgmt.flSDROnHDRBrightness
+					: newColorMgmt.flInternalDisplayBrightness );
+			}
 
 			calcColorTransform<s_nLutEdgeSize3d>( &g_tmpLut1d, s_nLutSize1d, &g_tmpLut3d, inputColorimetry, inputEOTF,
 				outputEncodingColorimetry, newColorMgmt.outputEncodingEOTF,
@@ -471,6 +478,8 @@ gamescope::ConVar<int> cv_hdr_software_backlight{ "hdr_software_backlight", -1, 
 	[]( gamescope::ConVar<int> &cvar ){ ResetBacklightWatchAttempt(); hasRepaint = true; } };
 gamescope::ConVar<float> cv_hdr_software_backlight_exponent{ "hdr_software_backlight_exponent", 0.0f, "Override the display script's backlight fraction to luminance exponent. 0 = use the script value.",
 	[]( gamescope::ConVar<float> &cvar ){ hasRepaint = true; } };
+gamescope::ConVar<float> cv_hdr_software_backlight_contrast{ "hdr_software_backlight_contrast", 0.0f, "Contrast boost strength for the emulated backlight. Steepens gamma as brightness drops. 0 = plain linear dimming.",
+	[]( gamescope::ConVar<float> &cvar ){ hasRepaint = true; } };
 bool g_bHDRItmEnable = false;
 int g_nCurrentRefreshRate_CachedValue = 0;
 
@@ -493,9 +502,16 @@ update_color_mgmt()
 
 	TryArmBacklightWatch();
 	// Pin the gain to 1 outside PQ so backlight writes don't dirty the LUTs.
-	g_ColorMgmt.pending.flBacklightGain = g_ColorMgmt.pending.outputEncodingEOTF == EOTF_PQ
-		? GetBacklightGain()
-		: 1.f;
+	if ( g_ColorMgmt.pending.outputEncodingEOTF == EOTF_PQ )
+	{
+		g_ColorMgmt.pending.flBacklightGain = GetBacklightGain();
+		g_ColorMgmt.pending.flBacklightDimContrast = cv_hdr_software_backlight_contrast;
+	}
+	else
+	{
+		g_ColorMgmt.pending.flBacklightGain = 1.f;
+		g_ColorMgmt.pending.flBacklightDimContrast = 0.f;
+	}
 
 #ifdef COLOR_MGMT_MICROBENCH
 	struct timespec t0, t1;

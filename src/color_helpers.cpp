@@ -673,13 +673,14 @@ bool g_bUseSourceEOTFForShaper = false;
 template <typename T>
 inline T applyShaper( const T & input, EOTF source, EOTF dest, const tonemapping_t & tonemapping, float flGain )
 {
-    if ( ( source == dest && flGain == 1.f ) || !tonemapping.bUseShaper )
+    if ( ( source == dest && flGain == 1.f && !tonemapping.BHasBacklightDim() ) || !tonemapping.bUseShaper )
     {
         return input;
     }
 
     T flLinear = flGain * calcEOTFToLinear( input, source, tonemapping );
     flLinear = tonemapping.apply( flLinear );
+    flLinear = tonemapping.applyBacklightDim( flLinear );
 
     return calcLinearToEOTF( flLinear, g_bUseSourceEOTFForShaper ? source : dest, tonemapping );
 }
@@ -804,6 +805,7 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
 
                     // Apply tonemapping
                     destColorLinear = tonemapping.apply( destColorLinear );
+                    destColorLinear = tonemapping.applyBacklightDim( destColorLinear );
 
                     // Hue preservation
                     if ( g_bHuePreservationWhenClipping )
