@@ -1099,6 +1099,15 @@ static void TryArmBacklightWatch()
 		g_SteamCompMgrWaiter.AddWaitable( &g_BacklightWaitable, EPOLLPRI );
 }
 
+static gamescope::ConCommand cc_backlight_status( "backlight_status", "Print the emulated backlight state",
+[]( std::span<std::string_view> args )
+{
+	xwm_log.infof( "backlight: open=%d fraction=%f gain=%f exponent=%f contrast=%f output_hdr=%d",
+		g_BacklightWaitable.IsOpen(), g_BacklightWaitable.GetFraction(), GetBacklightGain(),
+		static_cast<float>( cv_hdr_software_backlight_exponent ), static_cast<float>( cv_hdr_software_backlight_contrast ),
+		g_bOutputHDREnabled );
+});
+
 unsigned long	damageSequence = 0;
 
 uint64_t		cursorHideTime = 10'000ul * 1'000'000ul;
