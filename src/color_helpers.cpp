@@ -673,14 +673,16 @@ bool g_bUseSourceEOTFForShaper = false;
 template <typename T>
 inline T applyShaper( const T & input, EOTF source, EOTF dest, const tonemapping_t & tonemapping, float flGain )
 {
-    if ( ( source == dest && flGain == 1.f && !tonemapping.BHasBacklightDim() ) || !tonemapping.bUseShaper )
+    if ( ( source == dest && flGain == 1.f ) || !tonemapping.bUseShaper )
     {
         return input;
     }
 
+    // The backlight dim is deliberately NOT applied here. Folding it into the
+    // shaper compresses its output range, so the 3D LUT would only exercise its
+    // bottom lattice cells and near-black interpolation error lifts the blacks.
     T flLinear = flGain * calcEOTFToLinear( input, source, tonemapping );
     flLinear = tonemapping.apply( flLinear );
-    flLinear = tonemapping.applyBacklightDim( flLinear );
 
     return calcLinearToEOTF( flLinear, g_bUseSourceEOTFForShaper ? source : dest, tonemapping );
 }
