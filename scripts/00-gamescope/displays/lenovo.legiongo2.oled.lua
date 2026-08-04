@@ -18,6 +18,8 @@ gamescope.config.known_displays.lenovo_legiongo2_oled = {
         force_enabled = false,
         eotf = gamescope.eotf.pq,
         content_driven = true,
+        -- Panel ignores hardware backlight writes while in PQ mode.
+        software_backlight = true,
         -- Luminance and colorimetry come from the panel's EDID.
     },
     dynamic_refresh_rates = legiongo2_oled_refresh_rates,
@@ -59,8 +61,8 @@ gamescope.config.known_displays.lenovo_legiongo2_oled = {
         return mode
     end,
     matches = function(display)
-        if display.vendor == "SDC" and display.product == 0x4301 then
-            debug("[lenovo_legiongo2_oled] Matched vendor: "..display.vendor.." product: "..display.product)
+        if display.vendor == "SDC" and display.product == 0x4301 and display.model == "AMS881KB01-0" then
+            debug("[lenovo_legiongo2_oled] Matched vendor: "..display.vendor.." product: "..display.product.." model: "..display.model)
             return 5000
         end
         return -1
