@@ -27,6 +27,7 @@ namespace gamescope
 
         virtual void OnPollIn() {}
         virtual void OnPollOut() {}
+        virtual void OnPollPri() {}
         virtual void OnPollHangUp()
         {
             g_WaitableLog.errorf( "IWaitable hung up. Aborting." );
@@ -39,6 +40,10 @@ namespace gamescope
                 this->OnPollIn();
             if ( nEvents & EPOLLOUT )
                 this->OnPollOut();
+            // sysfs raises EPOLLPRI | EPOLLERR both for notifications and node
+            // removal, so deliver both here or a level-triggered epoll would spin.
+            if ( nEvents & ( EPOLLPRI | EPOLLERR ) )
+                this->OnPollPri();
             if ( nEvents & EPOLLHUP )
                 this->OnPollHangUp();
         }

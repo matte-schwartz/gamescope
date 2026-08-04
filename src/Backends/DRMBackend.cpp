@@ -2450,6 +2450,10 @@ namespace gamescope
 					m_Mutable.HDR.bExposeHDRSupport = otHDRInfo->get_or( "supported", false );
 					m_Mutable.HDR.eOutputEncodingEOTF = otHDRInfo->get_or( "eotf", EOTF_Gamma22 );
 					m_Mutable.HDR.bContentDrivenHDR = otHDRInfo->get_or( "content_driven", false );
+					m_Mutable.HDR.bSoftwareBacklight = otHDRInfo->get_or( "software_backlight", false );
+					m_Mutable.HDR.flSoftwareBacklightExponent = otHDRInfo->get_or( "software_backlight_exponent", 1.0f );
+					if ( m_Mutable.HDR.bSoftwareBacklight )
+						drm_log.infof( "Display script requests software backlight emulation in PQ mode" );
 
 					if ( sol::optional<float> ofMaxCLL = (*otHDRInfo)["max_content_light_level"] )
 					{

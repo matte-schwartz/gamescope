@@ -450,6 +450,7 @@ struct gamescope_color_mgmt_t
 	float flSDROnHDRBrightness = 203.f;
 	float flHDRInputGain = 1.f;
 	float flSDRInputGain = 1.f;
+	float flBacklightGain = 1.f;
 
 	// HDR Display Metadata Override & Tonemapping
 	ETonemapOperator hdrTonemapOperator = ETonemapOperator_None;

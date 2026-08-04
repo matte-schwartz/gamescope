@@ -121,6 +121,10 @@ namespace gamescope
         bool bAlwaysPatchEdid = false;
         // Only drive a panel in HDR while an HDR app is running.
         bool bContentDrivenHDR = false;
+        // Panel ignores its hardware backlight while signaling PQ. Emulate it in the color pipeline.
+        bool bSoftwareBacklight = false;
+        // Maps the normalized backlight fraction to a luminance fraction.
+        float flSoftwareBacklightExponent = 1.0f;
 
         // The output encoding to use for HDR output.
         // For typical HDR10 displays, this will be PQ.

@@ -53,6 +53,8 @@
 #include <filesystem>
 #include <variant>
 #include <unordered_set>
+#include <cmath>
+#include <limits.h>
 
 #include <assert.h>
 #include <stdlib.h>
@@ -422,6 +424,10 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
 				buildPQColorimetry( &inputColorimetry, &colorMapping, displayColorimetry );
 			}
 
+			// Emulated backlight for panels whose hardware backlight dies in PQ. SDR keeps the hardware backlight.
+			if ( newColorMgmt.outputEncodingEOTF == EOTF_PQ )
+				flGain *= newColorMgmt.flBacklightGain;
+
 			calcColorTransform<s_nLutEdgeSize3d>( &g_tmpLut1d, s_nLutSize1d, &g_tmpLut3d, inputColorimetry, inputEOTF,
 				outputEncodingColorimetry, newColorMgmt.outputEncodingEOTF,
 				newColorMgmt.outputVirtualWhite, newColorMgmt.chromaticAdaptationMode,
@@ -460,8 +466,16 @@ bool g_bSupportsHDR_CachedValue = false;
 bool g_bForceHDR10OutputDebug = false;
 gamescope::ConVar<bool> cv_hdr_enabled{ "hdr_enabled", false, "Whether or not HDR is enabled if it is available." };
 gamescope::ConVar<bool> cv_hdr_content_driven{ "hdr_content_driven", false, "Only drive a panel in HDR while an HDR app is running." };
+static void ResetBacklightWatchAttempt();
+gamescope::ConVar<int> cv_hdr_software_backlight{ "hdr_software_backlight", -1, "Emulate the backlight in the color pipeline while the output is in PQ. -1 = follow display script, 0 = off, 1 = on.",
+	[]( gamescope::ConVar<int> &cvar ){ ResetBacklightWatchAttempt(); hasRepaint = true; } };
+gamescope::ConVar<float> cv_hdr_software_backlight_exponent{ "hdr_software_backlight_exponent", 0.0f, "Override the display script's backlight fraction to luminance exponent. 0 = use the script value.",
+	[]( gamescope::ConVar<float> &cvar ){ hasRepaint = true; } };
 bool g_bHDRItmEnable = false;
 int g_nCurrentRefreshRate_CachedValue = 0;
+
+static void TryArmBacklightWatch();
+static float GetBacklightGain();
 
 static void
 update_color_mgmt()
@@ -476,6 +490,12 @@ update_color_mgmt()
 
 	g_ColorMgmt.pending.flInternalDisplayBrightness =
 		GetBackend()->GetCurrentConnector()->GetHDRInfo().uMaxContentLightLevel;
+
+	TryArmBacklightWatch();
+	// Pin the gain to 1 outside PQ so backlight writes don't dirty the LUTs.
+	g_ColorMgmt.pending.flBacklightGain = g_ColorMgmt.pending.outputEncodingEOTF == EOTF_PQ
+		? GetBacklightGain()
+		: 1.f;
 
 #ifdef COLOR_MGMT_MICROBENCH
 	struct timespec t0, t1;
@@ -925,6 +945,143 @@ static gamescope::ConCommand cc_debug_force_repaint( "debug_force_repaint", "For
 {
 	hasRepaint = true;
 });
+
+// Watches the internal panel's backlight node so its value can be emulated
+// in the color pipeline while the panel signals PQ and ignores the hardware backlight.
+class CBacklightWaitable final : public gamescope::IWaitable
+{
+public:
+	bool Init( const char *pszConnectorName )
+	{
+		std::error_code ec;
+		// amdgpu >= 6.1 parents the backlight on the connector kdev, eg. .../card0-eDP-1/amdgpu_bl0
+		std::string sConnectorToken = std::string( "-" ) + pszConnectorName + "/";
+		std::filesystem::path fallbackPath;
+		int nEntries = 0;
+		std::filesystem::path chosenPath;
+		for ( const auto &entry : std::filesystem::directory_iterator( "/sys/class/backlight", ec ) )
+		{
+			nEntries++;
+			fallbackPath = entry.path();
+			char szReal[ PATH_MAX ];
+			if ( realpath( entry.path().c_str(), szReal ) && strstr( szReal, sConnectorToken.c_str() ) )
+				chosenPath = entry.path();
+		}
+		// Older kernels parent the backlight on the PCI device instead.
+		if ( chosenPath.empty() && nEntries == 1 )
+			chosenPath = fallbackPath;
+		if ( chosenPath.empty() )
+			return false;
+
+		if ( FILE *pFile = fopen( ( chosenPath / "max_brightness" ).c_str(), "r" ) )
+		{
+			fscanf( pFile, "%lf", &m_flMaxBrightness );
+			fclose( pFile );
+		}
+		if ( m_flMaxBrightness <= 0.0 )
+			return false;
+
+		m_nFD = open( ( chosenPath / "actual_brightness" ).c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC );
+		if ( m_nFD < 0 )
+			return false;
+
+		xwm_log.infof( "Watching backlight %s (max %g) for PQ emulation", chosenPath.c_str(), m_flMaxBrightness );
+		// Consume any notify state pending at open so the level-triggered epoll starts clean.
+		OnPollPri();
+		return IsOpen();
+	}
+
+	void OnPollPri() final
+	{
+		char szBuf[ 32 ];
+		ssize_t nRead = pread( m_nFD, szBuf, sizeof( szBuf ) - 1, 0 );
+		if ( nRead <= 0 )
+		{
+			// Never return without consuming, a level-triggered epoll would spin.
+			Disable();
+			return;
+		}
+		szBuf[ nRead ] = '\0';
+		char *pszEnd = nullptr;
+		double flValue = strtod( szBuf, &pszEnd );
+		// Keep the last value on a garbage read, and floor the fraction so a
+		// zeroed node can never black out the screen entirely.
+		if ( pszEnd != szBuf )
+			m_flFraction = std::clamp( flValue / m_flMaxBrightness, 0.01, 1.0 );
+		hasRepaint = true;
+	}
+
+	void OnPollHangUp() final { Disable(); }
+	int GetFD() final { return m_nFD; }
+
+	bool IsOpen() const { return m_nFD >= 0; }
+	float GetFraction() const { return m_flFraction; }
+
+private:
+	void Disable()
+	{
+		xwm_log.errorf( "Backlight node went away, disabling PQ backlight emulation" );
+		g_SteamCompMgrWaiter.RemoveWaitable( this );
+		close( m_nFD );
+		m_nFD = -1;
+		m_flFraction = 1.f;
+		hasRepaint = true;
+	}
+
+	int m_nFD = -1;
+	double m_flMaxBrightness = 0.0;
+	float m_flFraction = 1.f;
+};
+
+static CBacklightWaitable g_BacklightWaitable;
+static gamescope::IBackendConnector *s_pBacklightAttemptedConn = nullptr;
+
+static void ResetBacklightWatchAttempt()
+{
+	s_pBacklightAttemptedConn = nullptr;
+}
+
+static float GetBacklightGain()
+{
+	if ( cv_hdr_software_backlight == 0 || !g_BacklightWaitable.IsOpen() )
+		return 1.f;
+
+	gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
+	if ( !pConn )
+		return 1.f;
+
+	const gamescope::BackendConnectorHDRInfo &hdrInfo = pConn->GetHDRInfo();
+	if ( cv_hdr_software_backlight < 0 && !hdrInfo.bSoftwareBacklight )
+		return 1.f;
+
+	float flExponent = cv_hdr_software_backlight_exponent > 0.0f
+		? cv_hdr_software_backlight_exponent
+		: hdrInfo.flSoftwareBacklightExponent;
+	return pow( g_BacklightWaitable.GetFraction(), flExponent );
+}
+
+// Arm the watch once per connector, so a boot on an external display still
+// picks up the internal panel on undock, and the convar can enable at runtime.
+static void TryArmBacklightWatch()
+{
+	if ( g_BacklightWaitable.IsOpen() )
+		return;
+
+	gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
+	if ( !pConn || pConn == s_pBacklightAttemptedConn )
+		return;
+	s_pBacklightAttemptedConn = pConn;
+
+	if ( pConn->GetScreenType() != gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL )
+		return;
+	if ( cv_hdr_software_backlight == 0 )
+		return;
+	if ( cv_hdr_software_backlight < 0 && !pConn->GetHDRInfo().bSoftwareBacklight )
+		return;
+
+	if ( g_BacklightWaitable.Init( pConn->GetName() ) )
+		g_SteamCompMgrWaiter.AddWaitable( &g_BacklightWaitable, EPOLLPRI );
+}
 
 unsigned long	damageSequence = 0;
 
