@@ -424,17 +424,6 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
 				buildPQColorimetry( &inputColorimetry, &colorMapping, displayColorimetry );
 			}
 
-			// Emulated backlight for panels whose hardware backlight dies in PQ. SDR keeps the hardware backlight.
-			if ( newColorMgmt.outputEncodingEOTF == EOTF_PQ )
-			{
-				tonemapping.flBacklightGain = newColorMgmt.flBacklightGain;
-				// Steepen the tone curve as the emulated backlight drops, like panel-side dimming does.
-				tonemapping.flBacklightGamma = 1.f + newColorMgmt.flBacklightDimContrast * ( 1.f - newColorMgmt.flBacklightGain );
-				tonemapping.flBacklightRefNits = std::max( 1.f, inputEOTF == EOTF_Gamma22
-					? newColorMgmt.flSDROnHDRBrightness
-					: newColorMgmt.flInternalDisplayBrightness );
-			}
-
 			calcColorTransform<s_nLutEdgeSize3d>( &g_tmpLut1d, s_nLutSize1d, &g_tmpLut3d, inputColorimetry, inputEOTF,
 				outputEncodingColorimetry, newColorMgmt.outputEncodingEOTF,
 				newColorMgmt.outputVirtualWhite, newColorMgmt.chromaticAdaptationMode,
@@ -501,16 +490,16 @@ update_color_mgmt()
 		GetBackend()->GetCurrentConnector()->GetHDRInfo().uMaxContentLightLevel;
 
 	TryArmBacklightWatch();
-	// Pin the gain to 1 outside PQ so backlight writes don't dirty the LUTs.
+	// The emulated backlight applies post-blend at the CRTC, not in the LUTs.
 	if ( g_ColorMgmt.pending.outputEncodingEOTF == EOTF_PQ )
 	{
-		g_ColorMgmt.pending.flBacklightGain = GetBacklightGain();
-		g_ColorMgmt.pending.flBacklightDimContrast = cv_hdr_software_backlight_contrast;
+		g_flBacklightGain = GetBacklightGain();
+		g_flBacklightGamma = 1.f + cv_hdr_software_backlight_contrast * ( 1.f - g_flBacklightGain );
 	}
 	else
 	{
-		g_ColorMgmt.pending.flBacklightGain = 1.f;
-		g_ColorMgmt.pending.flBacklightDimContrast = 0.f;
+		g_flBacklightGain = 1.f;
+		g_flBacklightGamma = 1.f;
 	}
 
 #ifdef COLOR_MGMT_MICROBENCH
@@ -1073,7 +1062,11 @@ static float GetBacklightGain()
 	float flExponent = cv_hdr_software_backlight_exponent > 0.0f
 		? cv_hdr_software_backlight_exponent
 		: hdrInfo.flSoftwareBacklightExponent;
-	return pow( g_BacklightWaitable.GetFraction(), flExponent );
+	float flFraction = pow( g_BacklightWaitable.GetFraction(), flExponent );
+	// Keep a ~5 nit floor on SDR white, like KWin, so minimum brightness
+	// never drives the panel below its usable PQ range.
+	float flMinGain = 5.f / std::max( g_ColorMgmt.pending.flSDROnHDRBrightness, 5.f );
+	return flMinGain + ( 1.f - flMinGain ) * flFraction;
 }
 
 // Arm the watch once per connector, so a boot on an external display still

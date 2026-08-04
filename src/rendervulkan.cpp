@@ -3706,6 +3706,10 @@ uint32_t vulkan_get_rgb10_capture_format( void )
 // Internal display's native brightness.
 float g_flInternalDisplayBrightnessNits = 500.0f;
 
+// Emulated backlight, consumed by the DRM backend as a CRTC gamma curve.
+float g_flBacklightGain = 1.f;
+float g_flBacklightGamma = 1.f;
+
 float g_flHDRItmSdrNits = 100.f;
 float g_flHDRItmTargetNits = 1000.f;
 

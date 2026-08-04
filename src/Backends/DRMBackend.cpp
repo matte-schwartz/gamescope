@@ -352,6 +352,7 @@ namespace gamescope
 			std::optional<CDRMAtomicProperty> ACTIVE;
 			std::optional<CDRMAtomicProperty> MODE_ID;
 			std::optional<CDRMAtomicProperty> GAMMA_LUT;
+			std::optional<CDRMAtomicProperty> GAMMA_LUT_SIZE;
 			std::optional<CDRMAtomicProperty> DEGAMMA_LUT;
 			std::optional<CDRMAtomicProperty> CTM;
 			std::optional<CDRMAtomicProperty> VRR_ENABLED;
@@ -2141,6 +2142,7 @@ namespace gamescope
 			m_Props.ACTIVE              = CDRMAtomicProperty::Instantiate( "ACTIVE",              this, *rawProperties );
 			m_Props.MODE_ID             = CDRMAtomicProperty::Instantiate( "MODE_ID",             this, *rawProperties );
 			m_Props.GAMMA_LUT           = CDRMAtomicProperty::Instantiate( "GAMMA_LUT",           this, *rawProperties );
+			m_Props.GAMMA_LUT_SIZE      = CDRMAtomicProperty::Instantiate( "GAMMA_LUT_SIZE",      this, *rawProperties );
 			m_Props.DEGAMMA_LUT         = CDRMAtomicProperty::Instantiate( "DEGAMMA_LUT",         this, *rawProperties );
 			m_Props.CTM                 = CDRMAtomicProperty::Instantiate( "CTM",                 this, *rawProperties );
 			m_Props.VRR_ENABLED         = CDRMAtomicProperty::Instantiate( "VRR_ENABLED",         this, *rawProperties );
@@ -2982,6 +2984,42 @@ static void drm_unlink_foreign_planes( struct drm_t *drm )
 
 /* Prepares an atomic commit for the provided scene-graph. Returns 0 on success,
  * negative errno on failure or if the scene-graph can't be presented directly. */
+// Emulated backlight, dimming the PQ-encoded output post-blend so the
+// plane LUTs keep their full undimmed range in both composite and scanout.
+static uint32_t drm_get_backlight_gamma_blob( struct drm_t *drm )
+{
+	if ( g_flBacklightGain >= 1.f && g_flBacklightGamma == 1.f )
+		return 0;
+	if ( !drm->pCRTC->GetProperties().GAMMA_LUT_SIZE )
+		return 0;
+
+	static std::shared_ptr<gamescope::BackendBlob> s_pBlob;
+	static float s_flGain, s_flGamma, s_flRef;
+
+	float flRef = std::max( g_flInternalDisplayBrightnessNits, 5.f );
+	if ( !s_pBlob || s_flGain != g_flBacklightGain || s_flGamma != g_flBacklightGamma || s_flRef != flRef )
+	{
+		s_flGain = g_flBacklightGain;
+		s_flGamma = g_flBacklightGamma;
+		s_flRef = flRef;
+
+		uint64_t ulSize = drm->pCRTC->GetProperties().GAMMA_LUT_SIZE->GetCurrentValue();
+		std::vector<drm_color_lut> lut( ulSize );
+		for ( uint64_t i = 0; i < ulSize; i++ )
+		{
+			float flNits = pq_to_nits( (float)i / (float)( ulSize - 1 ) );
+			float flNorm = std::min( flNits / flRef, 1.f );
+			float flOver = std::max( flNits - flRef, 0.f );
+			flNits = ( safe_pow( flNorm, s_flGamma ) * flRef + flOver ) * s_flGain;
+			uint16_t uValue = (uint16_t)std::min( nits_to_pq( flNits ) * 65535.f + 0.5f, 65535.f );
+			lut[i] = { .red = uValue, .green = uValue, .blue = uValue };
+		}
+		s_pBlob = GetBackend()->CreateBackendBlob( typeid( drm_color_lut ),
+			std::span<const uint8_t>( (const uint8_t *)lut.data(), lut.size() * sizeof( drm_color_lut ) ) );
+	}
+	return s_pBlob->GetBlobValue();
+}
+
 int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameInfo )
 {
 	if ( !drm->pConnector )
@@ -3151,9 +3189,9 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 			drm->pCRTC->GetProperties().MODE_ID->SetPendingValue( drm->req, drm->pending.mode_id ? drm->pending.mode_id->GetBlobValue() : 0lu, true );
 
 			// Clear color properties inherited from a previous DRM master (i.e. KDE's
-			// night light).
+			// night light). The emulated backlight owns GAMMA_LUT while active.
 			if ( drm->pCRTC->GetProperties().GAMMA_LUT )
-				drm->pCRTC->GetProperties().GAMMA_LUT->SetPendingValue( drm->req, 0, true );
+				drm->pCRTC->GetProperties().GAMMA_LUT->SetPendingValue( drm->req, drm_get_backlight_gamma_blob( drm ), true );
 
 			if ( drm->pCRTC->GetProperties().DEGAMMA_LUT )
 				drm->pCRTC->GetProperties().DEGAMMA_LUT->SetPendingValue( drm->req, 0, true );

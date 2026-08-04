@@ -287,29 +287,6 @@ struct tonemapping_t
 	ETonemapOperator eOperator = ETonemapOperator_None;
 	eetf_2390_t eetf2390;
 
-	// Software backlight dimming, applied in linear nits after tonemapping.
-	// Gamma above 1 steepens the tone curve below the reference white, like
-	// panel-side dimming does, instead of a plain linear scale.
-	float flBacklightGain = 1.f;
-	float flBacklightGamma = 1.f;
-	float flBacklightRefNits = 1.f;
-
-	inline bool BHasBacklightDim() const
-	{
-		return flBacklightGain != 1.f || flBacklightGamma != 1.f;
-	}
-
-	inline glm::vec3 applyBacklightDim( const glm::vec3 & inputNits ) const
-	{
-		if ( !BHasBacklightDim() )
-			return inputNits;
-		glm::vec3 vNorm = glm::clamp( inputNits / flBacklightRefNits, glm::vec3( 0.f ), glm::vec3( 1.f ) );
-		// Values above the reference and out-of-gamut negatives scale linearly.
-		glm::vec3 vOver = glm::max( inputNits - flBacklightRefNits, glm::vec3( 0.f ) );
-		glm::vec3 vUnder = glm::min( inputNits, glm::vec3( 0.f ) );
-		return ( glm::pow( vNorm, glm::vec3( flBacklightGamma ) ) * flBacklightRefNits + vOver + vUnder ) * flBacklightGain;
-	}
-
 	inline glm::vec3 apply( const glm::vec3 & inputNits ) const
 	{
 		switch ( eOperator )

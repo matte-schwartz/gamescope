@@ -450,8 +450,6 @@ struct gamescope_color_mgmt_t
 	float flSDROnHDRBrightness = 203.f;
 	float flHDRInputGain = 1.f;
 	float flSDRInputGain = 1.f;
-	float flBacklightGain = 1.f;
-	float flBacklightDimContrast = 0.f;
 
 	// HDR Display Metadata Override & Tonemapping
 	ETonemapOperator hdrTonemapOperator = ETonemapOperator_None;
@@ -521,6 +519,12 @@ struct gamescope_color_mgmt_tracker_t
 
 extern gamescope_color_mgmt_tracker_t g_ColorMgmt;
 extern gamescope_color_mgmt_luts g_ColorMgmtLuts[ EOTF_Count ];
+
+// Emulated backlight for panels whose hardware backlight dies in PQ,
+// applied post-blend as a CRTC gamma curve by the DRM backend.
+extern float g_flBacklightGain;
+extern float g_flBacklightGamma;
+extern float g_flInternalDisplayBrightnessNits;
 
 struct VulkanOutput_t
 {

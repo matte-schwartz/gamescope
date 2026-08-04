@@ -678,9 +678,6 @@ inline T applyShaper( const T & input, EOTF source, EOTF dest, const tonemapping
         return input;
     }
 
-    // The backlight dim is deliberately NOT applied here. Folding it into the
-    // shaper compresses its output range, so the 3D LUT would only exercise its
-    // bottom lattice cells and near-black interpolation error lifts the blacks.
     T flLinear = flGain * calcEOTFToLinear( input, source, tonemapping );
     flLinear = tonemapping.apply( flLinear );
 
@@ -807,7 +804,6 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
 
                     // Apply tonemapping
                     destColorLinear = tonemapping.apply( destColorLinear );
-                    destColorLinear = tonemapping.applyBacklightDim( destColorLinear );
 
                     // Hue preservation
                     if ( g_bHuePreservationWhenClipping )
