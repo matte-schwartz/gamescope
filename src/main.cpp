@@ -445,6 +445,16 @@ static enum gamescope::GamescopeBackend parse_backend_name(const char *str)
 	}
 }
 
+static enum gamescope::GamescopeBackend auto_select_backend()
+{
+	if ( getenv( "WAYLAND_DISPLAY" ) != NULL )
+		return gamescope::GamescopeBackend::Wayland;
+	else if ( getenv( "DISPLAY" ) != NULL )
+		return gamescope::GamescopeBackend::SDL;
+	else
+		return gamescope::GamescopeBackend::DRM;
+}
+
 static int parse_integer(const char *str, const char *optionName)
 {
 	auto result = gamescope::Parse<int>(str);
@@ -718,8 +728,6 @@ int main(int argc, char **argv)
 
 	gamescope::GamescopeBackend eCurrentBackend = gamescope::GamescopeBackend::Auto;
 
-	gamescope::PrintVersion();
-
 	int o;
 	int opt_index = -1;
 	while ((o = getopt_long(argc, argv, gamescope_optstring, gamescope_options, &opt_index)) != -1)
@@ -776,10 +784,11 @@ int main(int argc, char **argv)
 			case 0: // long options without a short option
 				opt_name = gamescope_options[opt_index].name;
 				if (strcmp(opt_name, "help") == 0) {
+					gamescope::PrintVersion();
 					fprintf(stderr, "%s", usage);
 					return 0;
 				} else if (strcmp(opt_name, "version") == 0) {
-					// We always print the version to stderr anyway.
+					gamescope::PrintVersion();
 					return 0;
 				} else if (strcmp(opt_name, "debug-layers") == 0) {
 					g_bDebugLayers = true;
@@ -849,6 +858,17 @@ int main(int argc, char **argv)
 				return 1;
 		}
 	}
+
+	// Steam preloads its overlay into us, but only the SDL backend can draw it.
+	// A ConVar or script override comes too late to unload it.
+	gamescope::GamescopeBackend eLaunchBackend = eCurrentBackend;
+	if ( eLaunchBackend == gamescope::GamescopeBackend::Auto )
+		eLaunchBackend = auto_select_backend();
+	if ( eLaunchBackend != gamescope::GamescopeBackend::SDL )
+		gamescope::Process::RestartWithoutSteamOverlay( argv );
+
+	// Print this after the re-exec, so we only announce ourselves once.
+	gamescope::PrintVersion();
 
 	if ( gamescope::Process::HasCapSysNice() )
 	{
@@ -922,12 +942,7 @@ int main(int argc, char **argv)
 
 	if ( eCurrentBackend == gamescope::GamescopeBackend::Auto )
 	{
-		if ( g_pOriginalWaylandDisplay != NULL )
-			eCurrentBackend = gamescope::GamescopeBackend::Wayland;
-		else if ( g_pOriginalDisplay != NULL )
-			eCurrentBackend = gamescope::GamescopeBackend::SDL;
-		else
-			eCurrentBackend = gamescope::GamescopeBackend::DRM;
+		eCurrentBackend = auto_select_backend();
 	}
 
 	if ( g_pOriginalWaylandDisplay != NULL )
