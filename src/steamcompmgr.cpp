@@ -8249,8 +8249,7 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 {
 	// We could just run this inside the child process,
 	// but we might as well just run it here at this point.
-	// and affect all future child processes, without needing
-	// a pre-amble inside of them.
+	// and affect all future child processes.
 	{
 		// Remove gameoverlayrenderer.so from the child if Gamescope
 		// is running with a window + Vulkan swapchain (eg. SDL2 backend)
@@ -8293,7 +8292,8 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 	if ( g_bLaunchMangoapp )
 	{
 		char *ppMangoappArgv[] = { (char *)"mangoapp", NULL };
-		gamescope::Process::SpawnProcessInWatchdog( ppMangoappArgv, true );
+		// The Steam overlay would latch onto mangoapp's own swapchain as if it were the game.
+		gamescope::Process::SpawnProcessInWatchdog( ppMangoappArgv, true, gamescope::Process::RemoveSteamOverlayFromPreload );
 	}
 }
 
