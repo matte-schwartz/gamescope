@@ -8251,9 +8251,8 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 	// but we might as well just run it here at this point.
 	// and affect all future child processes.
 	{
-		// Remove gameoverlayrenderer.so from the child if Gamescope
-		// is running with a window + Vulkan swapchain (eg. SDL2 backend)
-		if ( GetBackend()->UsesVulkanSwapchain() )
+		// We draw the overlay ourselves when we present with a swapchain, otherwise the game does.
+		if ( !gamescope::Process::RestoreSteamOverlayPreload() && GetBackend()->UsesVulkanSwapchain() )
 			gamescope::Process::RemoveSteamOverlayFromPreload();
 
 		unsetenv( "ENABLE_VKBASALT" );

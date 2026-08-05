@@ -299,6 +299,53 @@ namespace gamescope::Process
             unsetenv( "LD_PRELOAD" );
     }
 
+    // Doubles as the guard that stops us from ever exec'ing twice.
+    static constexpr const char *k_pszStashedOverlayPreload = "GAMESCOPE_STEAM_OVERLAY_LD_PRELOAD";
+
+    void RestartWithoutSteamOverlay( char **argv )
+    {
+        if ( getenv( k_pszStashedOverlayPreload ) )
+            return;
+
+        const char *pszPreload = getenv( "LD_PRELOAD" );
+        if ( !pszPreload || std::string_view( pszPreload ).find( "gameoverlayrenderer.so" ) == std::string_view::npos )
+            return;
+
+        // A pointer from getenv does not survive setenv, so keep our own copy.
+        std::string sPreload = pszPreload;
+
+        if ( setenv( k_pszStashedOverlayPreload, sPreload.c_str(), 1 ) != 0 )
+        {
+            s_ProcessLog.errorf_errno( "Failed to stash the Steam overlay, keeping it loaded" );
+            return;
+        }
+        RemoveSteamOverlayFromPreload();
+
+        s_ProcessLog.infof( "Restarting ourselves to drop the Steam overlay from LD_PRELOAD." );
+        execv( "/proc/self/exe", argv );
+
+        // Still here, so put everything back and carry on with the overlay loaded.
+        s_ProcessLog.errorf_errno( "Failed to restart without the Steam overlay" );
+        setenv( "LD_PRELOAD", sPreload.c_str(), 1 );
+        unsetenv( k_pszStashedOverlayPreload );
+    }
+
+    bool RestoreSteamOverlayPreload()
+    {
+        const char *pszStashedPreload = getenv( k_pszStashedOverlayPreload );
+        if ( !pszStashedPreload )
+            return false;
+
+        std::string sPreload = pszStashedPreload;
+        if ( setenv( "LD_PRELOAD", sPreload.c_str(), 1 ) != 0 )
+            s_ProcessLog.errorf_errno( "Failed to pass the Steam overlay through to the application" );
+        else
+            s_ProcessLog.infof( "Passing the Steam overlay through to the application." );
+
+        unsetenv( k_pszStashedOverlayPreload );
+        return true;
+    }
+
     pid_t SpawnProcess( char **argv, std::function<void()> fnPreambleInChild, bool bDoubleFork )
     {
         // Create a pipe for the child to return the grandchild's
