@@ -31,6 +31,8 @@ namespace gamescope::Process
 
     void CloseAllFds( std::span<int> nExcludedFds );
 
+    void RemoveSteamOverlayFromPreload();
+
     pid_t SpawnProcess( char **argv, std::function<void()> fnPreambleInChild = nullptr, bool bDoubleFork = false );
     pid_t SpawnProcessInWatchdog( char **argv, bool bRespawn = false, std::function<void()> fnPreambleInChild = nullptr );
 
