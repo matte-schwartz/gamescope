@@ -8247,48 +8247,15 @@ static gamescope::ConVar<std::string> cv_mouse_relative_filter_appids( "mouse_re
 
 void LaunchNestedChildren( char **ppPrimaryChildArgv )
 {
-	std::string sNewPreload;
-	{
-		const char *pszCurrentPreload = getenv( "LD_PRELOAD" );
-		if ( pszCurrentPreload && *pszCurrentPreload )
-		{
-			// Remove gameoverlayrenderer.so from the child if Gamescope
-			// is running with a window + Vulkan swapchain (eg. SDL2 backend)
-			if ( GetBackend()->UsesVulkanSwapchain() )
-			{
-				std::vector<std::string_view> svLibraries = gamescope::Split( pszCurrentPreload, " :" );
-				std::erase_if( svLibraries, []( std::string_view svPreload )
-				{
-					return svPreload.find( "gameoverlayrenderer.so" ) != std::string_view::npos;
-				});
-
-				bool bFirst = true;
-				for ( std::string_view svLibrary : svLibraries )
-				{
-					if ( !bFirst )
-					{
-						sNewPreload.append( ":" );
-					}
-					bFirst = false;
-					sNewPreload.append( svLibrary );
-				}
-			}
-			else
-			{
-				sNewPreload = pszCurrentPreload;
-			}
-		}
-	}
-
 	// We could just run this inside the child process,
 	// but we might as well just run it here at this point.
 	// and affect all future child processes, without needing
 	// a pre-amble inside of them.
 	{
-		if ( !sNewPreload.empty() )
-			setenv( "LD_PRELOAD", sNewPreload.c_str(), 1 );
-		else
-			unsetenv( "LD_PRELOAD" );
+		// Remove gameoverlayrenderer.so from the child if Gamescope
+		// is running with a window + Vulkan swapchain (eg. SDL2 backend)
+		if ( GetBackend()->UsesVulkanSwapchain() )
+			gamescope::Process::RemoveSteamOverlayFromPreload();
 
 		unsetenv( "ENABLE_VKBASALT" );
 		// Enable Gamescope WSI by default for nested.

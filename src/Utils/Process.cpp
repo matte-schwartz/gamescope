@@ -269,6 +269,36 @@ namespace gamescope::Process
         }
     }
 
+    void RemoveSteamOverlayFromPreload()
+    {
+        const char *pszCurrentPreload = getenv( "LD_PRELOAD" );
+        if ( !pszCurrentPreload )
+            return;
+
+        std::vector<std::string_view> svLibraries = Split( pszCurrentPreload, " :" );
+        std::erase_if( svLibraries, []( std::string_view svPreload )
+        {
+            return svPreload.find( "gameoverlayrenderer.so" ) != std::string_view::npos;
+        });
+
+        std::string sNewPreload;
+        bool bFirst = true;
+        for ( std::string_view svLibrary : svLibraries )
+        {
+            if ( !bFirst )
+            {
+                sNewPreload.append( ":" );
+            }
+            bFirst = false;
+            sNewPreload.append( svLibrary );
+        }
+
+        if ( !sNewPreload.empty() )
+            setenv( "LD_PRELOAD", sNewPreload.c_str(), 1 );
+        else
+            unsetenv( "LD_PRELOAD" );
+    }
+
     pid_t SpawnProcess( char **argv, std::function<void()> fnPreambleInChild, bool bDoubleFork )
     {
         // Create a pipe for the child to return the grandchild's
