@@ -152,13 +152,6 @@ namespace gamescope
         }
     };
 
-    struct BackendMode
-    {
-        uint32_t uWidth;
-        uint32_t uHeight;
-        uint32_t uRefresh; // Hz
-    };
-
     struct BackendPresentFeedback
     {
     public:

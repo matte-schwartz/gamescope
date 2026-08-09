@@ -39,6 +39,7 @@
 #include "gpuvis_trace_utils.h"
 #include "log.hpp"
 #include "main.hpp"
+#include "mode_list_file.h"
 #include "modegen.hpp"
 #include "rendervulkan.hpp"
 #include "steamcompmgr.hpp"
@@ -1275,7 +1276,10 @@ static bool setup_best_connector(struct drm_t *drm, bool force, bool initial)
 	wlserver_unlock();
 
 	if (!initial)
+	{
 		WritePatchedEdid( best->GetRawEDID(), best->GetHDRInfo(), g_bRotated );
+		WriteModeListFile( best->GetModes() );
+	}
 
 	update_connector_display_info_wl( drm );
 
@@ -3725,7 +3729,10 @@ namespace gamescope
 		virtual bool PostInit() override
 		{
 			if ( g_DRM.pConnector )
+			{
 				WritePatchedEdid( g_DRM.pConnector->GetRawEDID(), g_DRM.pConnector->GetHDRInfo(), g_bRotated );
+				WriteModeListFile( g_DRM.pConnector->GetModes() );
+			}
 			return true;
 		}
 
@@ -4190,6 +4197,7 @@ namespace gamescope
 				return;
 
 			WritePatchedEdid( GetCurrentConnector()->GetRawEDID(), GetCurrentConnector()->GetHDRInfo(), g_bRotated );
+			WriteModeListFile( GetCurrentConnector()->GetModes() );
 		}
 
 	protected:
