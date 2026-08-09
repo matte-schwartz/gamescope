@@ -1065,6 +1065,14 @@ static bool get_saved_mode(const char *description, saved_mode &mode_info)
 /* Resolve a mode from the display we last drove, identified by the persisted EDID. */
 static bool get_last_display_mode(saved_mode &mode_info)
 {
+	// A mode picked while headless is saved under the virtual screen's own name.
+	if (get_saved_mode("Virtual screen", mode_info) && mode_info.width > 0 && mode_info.height > 0 && mode_info.refresh > 0)
+	{
+		drm_log.infof("using saved mode %dx%d@%d of the virtual screen",
+			mode_info.width, mode_info.height, mode_info.refresh);
+		return true;
+	}
+
 	const char *pszPath = gamescope::GetPatchedEdidPath();
 	if (!pszPath)
 		return false;
@@ -1186,12 +1194,15 @@ static bool setup_best_connector(struct drm_t *drm, bool force, bool initial)
 		drm_log.infof("cannot find any connected connector!");
 		drm_unset_connector(drm);
 		drm_unset_mode(drm, force);
+
+		// Steam keys saved modes by the description, so get_last_display_mode reads this name back.
 		const struct wlserver_output_info wlserver_output_info = {
 			.description = "Virtual screen",
 		};
 		wlserver_lock();
 		wlserver_set_output_info(&wlserver_output_info);
 		wlserver_unlock();
+		update_connector_display_info_wl( drm );
 		return true;
 	}
 

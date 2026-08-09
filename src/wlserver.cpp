@@ -1335,14 +1335,12 @@ void wlserver_send_gamescope_control( wl_resource *control )
 	assert( wlserver_is_lock_held() );
 
 	gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
-	if ( !pConn )
-		return;
 
 	uint32_t flags = get_conn_display_info_flags();
 
 	struct wl_array display_rates;
 	wl_array_init(&display_rates);
-	if ( pConn->GetValidDynamicRefreshRates().size() )
+	if ( pConn && pConn->GetValidDynamicRefreshRates().size() )
 	{
 		for ( uint32_t uRateHz : pConn->GetValidDynamicRefreshRates() )
 		{
@@ -1355,7 +1353,11 @@ void wlserver_send_gamescope_control( wl_resource *control )
 		uint32_t *ptr = (uint32_t *)wl_array_add( &display_rates, sizeof(uint32_t) );
 		*ptr = (uint32_t)gamescope::ConvertmHzToHz( g_nOutputRefresh );
 	}
-	gamescope_control_send_active_display_info( control, pConn->GetName(), pConn->GetMake(), pConn->GetModel(), flags, &display_rates );
+	gamescope_control_send_active_display_info( control,
+		pConn ? pConn->GetName() : "Headless",
+		pConn ? pConn->GetMake() : "Gamescope",
+		pConn ? pConn->GetModel() : "Virtual screen",
+		flags, &display_rates );
 	wl_array_release(&display_rates);
 }
 
