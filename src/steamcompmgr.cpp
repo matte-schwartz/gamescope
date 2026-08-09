@@ -89,6 +89,7 @@
 #include "Utils/Defer.h"
 #include "win32_styles.h"
 #include "edid.h"
+#include "mode_list_file.h"
 #include "hdmi.h"
 #include "convar.h"
 #include "Script/Script.h"
@@ -8110,6 +8111,28 @@ void update_vrr_atoms(xwayland_ctx_t *root_ctx, bool force, bool* needs_flush = 
 	}
 }
 
+static void publish_external_mode_list(xwayland_ctx_t *root_ctx, std::span<const gamescope::BackendMode> connectorModes)
+{
+	char modes[4096] = "";
+	int remaining_size = sizeof(modes) - 1;
+	int len = 0;
+	for (int i = 0; remaining_size > 0 && i < (int)connectorModes.size(); i++)
+	{
+		const auto& mode = connectorModes[i];
+		int mode_len = snprintf(&modes[len], remaining_size, "%s%dx%d@%d",
+			i == 0 ? "" : " ",
+			int(mode.uWidth), int(mode.uHeight), int(mode.uRefresh));
+		len += mode_len;
+		remaining_size -= mode_len;
+	}
+	XChangeProperty(root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeDisplayModeListExternal, XA_STRING, 8, PropModeReplace,
+		(unsigned char *)modes, strlen(modes) + 1 );
+
+	uint32_t one = 1;
+	XChangeProperty(root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeDisplayIsExternal, XA_CARDINAL, 32, PropModeReplace,
+		(unsigned char *)&one, 1 );
+}
+
 void update_mode_atoms(xwayland_ctx_t *root_ctx, bool* needs_flush = nullptr)
 {
 	if (needs_flush)
@@ -8126,28 +8149,15 @@ void update_mode_atoms(xwayland_ctx_t *root_ctx, bool* needs_flush = nullptr)
 	}
 
 	if ( !GetBackend()->GetCurrentConnector() )
-		return;
-
-	auto connectorModes = GetBackend()->GetCurrentConnector()->GetModes();
-
-	char modes[4096] = "";
-	int remaining_size = sizeof(modes) - 1;
-	int len = 0;
-	for (int i = 0; remaining_size > 0 && i < (int)connectorModes.size(); i++)
 	{
-		const auto& mode = connectorModes[i];
-		int mode_len = snprintf(&modes[len], remaining_size, "%s%dx%d@%d",
-			i == 0 ? "" : " ",
-			int(mode.uWidth), int(mode.uHeight), int(mode.uRefresh));
-		len += mode_len;
-		remaining_size -= mode_len;
+		// Headless: keep offering the last driven display's modes.
+		std::vector<gamescope::BackendMode> modes = gamescope::LoadModeListFile();
+		if ( !modes.empty() )
+			publish_external_mode_list( root_ctx, modes );
+		return;
 	}
-	XChangeProperty(root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeDisplayModeListExternal, XA_STRING, 8, PropModeReplace,
-		(unsigned char *)modes, strlen(modes) + 1 );
-	
-	uint32_t one = 1;
-	XChangeProperty(root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeDisplayIsExternal, XA_CARDINAL, 32, PropModeReplace,
-		(unsigned char *)&one, 1 );
+
+	publish_external_mode_list( root_ctx, GetBackend()->GetCurrentConnector()->GetModes() );
 }
 
 extern int g_nPreferredOutputWidth;
