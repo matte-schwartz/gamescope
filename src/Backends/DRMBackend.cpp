@@ -595,7 +595,7 @@ static LogScope liftoff_log_scope( "liftoff" );
 
 static std::unordered_map< std::string, std::string > pnps = {};
 
-static void drm_unset_mode( struct drm_t *drm );
+static void drm_unset_mode( struct drm_t *drm, bool force );
 static void drm_unset_connector( struct drm_t *drm );
 
 static constexpr uint32_t s_kSteamDeckLCDRates[] =
@@ -1185,7 +1185,7 @@ static bool setup_best_connector(struct drm_t *drm, bool force, bool initial)
 	if (best == nullptr) {
 		drm_log.infof("cannot find any connected connector!");
 		drm_unset_connector(drm);
-		drm_unset_mode(drm);
+		drm_unset_mode(drm, force);
 		const struct wlserver_output_info wlserver_output_info = {
 			.description = "Virtual screen",
 		};
@@ -3436,7 +3436,7 @@ bool drm_update_color_mgmt(struct drm_t *drm)
 
 int g_nDynamicRefreshHz = 0;
 
-static void drm_unset_mode( struct drm_t *drm )
+static void drm_unset_mode( struct drm_t *drm, bool force )
 {
 	drm->pending.mode_id = 0;
 	drm->needs_modeset = true;
@@ -3447,9 +3447,9 @@ static void drm_unset_mode( struct drm_t *drm )
 		g_nOutputHeight = drm->preferred_height;
 		g_nOutputRefresh = drm->preferred_refresh;
 	}
-	else if ( g_nOutputWidth == 0 || g_nOutputHeight == 0 )
+	else if ( force )
 	{
-		// Cold headless start, size the virtual screen off the display we last drove.
+		// Cold start, or Steam picked a mode while headless.
 		saved_mode mode_info{};
 		if ( get_last_display_mode( mode_info ) )
 		{
