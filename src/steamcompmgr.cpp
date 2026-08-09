@@ -8152,8 +8152,10 @@ void update_mode_atoms(xwayland_ctx_t *root_ctx, bool* needs_flush = nullptr)
 	{
 		// Headless: keep offering the last driven display's modes.
 		std::vector<gamescope::BackendMode> modes = gamescope::LoadModeListFile();
-		if ( !modes.empty() )
-			publish_external_mode_list( root_ctx, modes );
+		if ( modes.empty() )
+			modes.push_back( gamescope::BackendMode{ (uint32_t)g_nOutputWidth, (uint32_t)g_nOutputHeight, (uint32_t)gamescope::ConvertmHzToHz( g_nOutputRefresh ) } );
+		gamescope::AppendSyntheticModes( modes );
+		publish_external_mode_list( root_ctx, modes );
 		return;
 	}
 

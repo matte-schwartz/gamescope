@@ -50,6 +50,43 @@ namespace gamescope
         return modes;
     }
 
+    // Streaming-oriented modes offered on top of the display's own list.
+    inline void AppendSyntheticModes( std::vector<BackendMode> &modes )
+    {
+        static constexpr uint32_t k_uSyntheticRefreshes[] = { 60, 90, 120, 144 };
+        static constexpr BackendMode k_SyntheticResolutions[] =
+        {
+            { 1920, 1080, 0 },
+            { 2560, 1440, 0 },
+            { 3840, 2160, 0 },
+            { 2560, 1080, 0 },
+            { 3440, 1440, 0 },
+            { 3840, 1080, 0 },
+            { 3840, 1600, 0 },
+            { 5120, 1440, 0 },
+            { 5120, 2160, 0 },
+            { 7680, 2160, 0 },
+        };
+
+        for ( const BackendMode &res : k_SyntheticResolutions )
+        {
+            for ( uint32_t uRefresh : k_uSyntheticRefreshes )
+            {
+                bool bHave = false;
+                for ( const BackendMode &mode : modes )
+                {
+                    if ( mode.uWidth == res.uWidth && mode.uHeight == res.uHeight && mode.uRefresh == uRefresh )
+                    {
+                        bHave = true;
+                        break;
+                    }
+                }
+                if ( !bHave )
+                    modes.push_back( BackendMode{ res.uWidth, res.uHeight, uRefresh } );
+            }
+        }
+    }
+
     void WriteModeListFile( std::span<const BackendMode> modes );
     std::vector<BackendMode> LoadModeListFile();
 }
