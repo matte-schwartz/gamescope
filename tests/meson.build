@@ -14,3 +14,12 @@ test_convar = executable(
 	cpp_args: gamescope_cpp_args,
 )
 test('convar', test_convar)
+
+test_mode_list = executable(
+	'test_mode_list',
+	['test_mode_list.cpp'],
+	include_directories: [srcdir],
+	dependencies: [catch2_dep],
+	cpp_args: gamescope_cpp_args,
+)
+test('mode_list', test_mode_list)
