@@ -6513,8 +6513,27 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		float vec[3] = { 0.0f, 0.0f, 0.0f };
 		if ( bHasVec && user_vec.size() == 3 )
 		{
+			// HACK: 64-bit Steam client sends garbage values with XChangeProperty
+			static constexpr uint32_t k_uStockNightModeHueBits = 0x3D8E38E4; // 25/360
+			static constexpr uint32_t k_uNightModeHueCapBits = 0x3E2AAAAB; // 60/360
+			if ( user_vec[2] > 0x3F800000u || user_vec[1] > k_uNightModeHueCapBits )
+			{
+				user_vec[2] = user_vec[1];
+				user_vec[1] = k_uStockNightModeHueBits;
+			}
+
 			for (int i = 0; i < 3; i++)
 				vec[i] = bit_cast<float>( user_vec[i] );
+
+			// Values are [0, 1] floats, anything left outside is malformed, keep identity.
+			for (int i = 0; i < 3; i++)
+			{
+				if ( user_vec[i] > 0x3F800000u )
+				{
+					vec[0] = vec[1] = vec[2] = 0.0f;
+					break;
+				}
+			}
 		}
 
 		nightmode_t nightmode;
