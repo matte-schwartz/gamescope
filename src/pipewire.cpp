@@ -33,6 +33,7 @@ static uint32_t s_nCaptureWidth;
 static uint32_t s_nCaptureHeight;
 static uint32_t s_nOutputWidth;
 static uint32_t s_nOutputHeight;
+static bool s_bHDR;
 
 static void destroy_buffer(struct pipewire_buffer *buffer) {
 	assert(buffer->buffer == nullptr);
@@ -101,6 +102,12 @@ static void build_format_params(struct spa_pod_builder *builder, spa_video_forma
 	struct spa_fraction framerate = SPA_FRACTION(0, 1);
 	uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
 
+	// xRGB_210LE is only offered while HDR output is on, so it defaults to PQ/BT2020 with SDR as the alternative.
+	constexpr enum spa_video_transfer_function transfer_default = SPA_VIDEO_TRANSFER_SMPTE2084;
+	constexpr enum spa_video_transfer_function transfer_alt = SPA_VIDEO_TRANSFER_GAMMA22;
+	constexpr enum spa_video_color_primaries primaries_default = SPA_VIDEO_COLOR_PRIMARIES_BT2020;
+	constexpr enum spa_video_color_primaries primaries_alt = SPA_VIDEO_COLOR_PRIMARIES_BT709;
+
 	struct spa_pod_frame obj_frame, choice_frame;
 	spa_pod_builder_push_object(builder, &obj_frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
 	spa_pod_builder_add(builder,
@@ -122,6 +129,13 @@ static void build_format_params(struct spa_pod_builder *builder, spa_video_forma
 							SPA_VIDEO_COLOR_RANGE_16_235,
 							SPA_VIDEO_COLOR_RANGE_16_235,
 							SPA_VIDEO_COLOR_RANGE_0_255),
+			0);
+	} else if (format == SPA_VIDEO_FORMAT_xRGB_210LE) {
+		spa_pod_builder_add(builder,
+			SPA_FORMAT_VIDEO_transferFunction, SPA_POD_CHOICE_ENUM_Id(3,
+							transfer_default, transfer_default, transfer_alt),
+			SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_CHOICE_ENUM_Id(3,
+							primaries_default, primaries_default, primaries_alt),
 			0);
 	}
 	spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
@@ -152,6 +166,13 @@ static void build_format_params(struct spa_pod_builder *builder, spa_video_forma
 							SPA_VIDEO_COLOR_RANGE_16_235,
 							SPA_VIDEO_COLOR_RANGE_0_255),
 			0);
+	} else if (format == SPA_VIDEO_FORMAT_xRGB_210LE) {
+		spa_pod_builder_add(builder,
+			SPA_FORMAT_VIDEO_transferFunction, SPA_POD_CHOICE_ENUM_Id(3,
+							transfer_default, transfer_default, transfer_alt),
+			SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_CHOICE_ENUM_Id(3,
+							primaries_default, primaries_default, primaries_alt),
+			0);
 	}
 	params.push_back((const struct spa_pod *) spa_pod_builder_pop(builder, &obj_frame));
 
@@ -163,6 +184,10 @@ static void build_format_params(struct spa_pod_builder *builder, spa_video_forma
 static std::vector<const struct spa_pod *> build_format_params(struct spa_pod_builder *builder)
 {
 	std::vector<const struct spa_pod *> params;
+
+	// Offered first so a consumer that can take 10 bit PQ prefers it over tonemapped SDR.
+	if (s_bHDR && vulkan_get_rgb10_capture_format() == DRM_FORMAT_XRGB2101010)
+		build_format_params(builder, SPA_VIDEO_FORMAT_xRGB_210LE, params);
 
 	build_format_params(builder, SPA_VIDEO_FORMAT_BGRx, params);
 	build_format_params(builder, SPA_VIDEO_FORMAT_NV12, params);
@@ -285,7 +310,11 @@ static void dispatch_nudge(struct pipewire_state *state, int fd)
 		s_nOutputHeight = g_nOutputHeight;
 		calculate_capture_size();
 	}
-	if (s_nCaptureWidth != state->video_info.size.width || s_nCaptureHeight != state->video_info.size.height) {
+	bool bHDRChanged = g_bOutputHDREnabled != s_bHDR;
+	if (bHDRChanged) {
+		s_bHDR = g_bOutputHDREnabled;
+	}
+	if (s_nCaptureWidth != state->video_info.size.width || s_nCaptureHeight != state->video_info.size.height || bHDRChanged) {
 		pwr_log.debugf("renegotiating stream params (size: %dx%d)", s_nCaptureWidth, s_nCaptureHeight);
 
 		uint8_t buf[4096];
@@ -450,6 +479,7 @@ uint32_t spa_format_to_drm(uint32_t spa_format)
 	switch (spa_format)
 	{
 		case SPA_VIDEO_FORMAT_NV12: return DRM_FORMAT_NV12;
+		case SPA_VIDEO_FORMAT_xRGB_210LE: return DRM_FORMAT_XRGB2101010;
 		default:
 		case SPA_VIDEO_FORMAT_BGR: return DRM_FORMAT_XRGB8888;
 	}
@@ -713,6 +743,7 @@ bool init_pipewire(void)
 	s_nRequestedHeight = 0;
 	s_nOutputWidth = g_nOutputWidth;
 	s_nOutputHeight = g_nOutputHeight;
+	s_bHDR = g_bOutputHDREnabled;
 	calculate_capture_size();
 
 	uint8_t buf[4096];

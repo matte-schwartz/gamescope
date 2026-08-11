@@ -2786,9 +2786,11 @@ static void paint_pipewire()
 	if ( !s_pPipewireBuffer || !s_pPipewireBuffer->texture )
 		return;
 
+	const bool bRGB10PQ = s_pPipewireBuffer->IsRGB10PQ();
+
 	struct FrameInfo_t frameInfo = {};
 	frameInfo.applyOutputColorMgmt = true;
-	frameInfo.outputEncodingEOTF   = EOTF_Gamma22;
+	frameInfo.outputEncodingEOTF   = bRGB10PQ ? EOTF_PQ : EOTF_Gamma22;
 	frameInfo.allowVRR             = false;
 	frameInfo.bFadingOut           = false;
 
@@ -2799,11 +2801,12 @@ static void paint_pipewire()
 	frameInfo.eUpscaleFilter = upscaleSettings.eFilter;
 	frameInfo.eUpscaleScaler = upscaleSettings.eScaler;
 
-	// Apply screenshot-style color management.
+	// Screenshot-style color management, the HDR LUTs when the negotiated format is 10 bit PQ.
 	for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
 	{
-		frameInfo.lut3D[nInputEOTF]     = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut3d;
-		frameInfo.shaperLut[nInputEOTF] = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut1d;
+		auto &luts = bRGB10PQ ? g_ScreenshotColorMgmtLutsHDR : g_ScreenshotColorMgmtLuts;
+		frameInfo.lut3D[nInputEOTF]     = luts[nInputEOTF].vk_lut3d;
+		frameInfo.shaperLut[nInputEOTF] = luts[nInputEOTF].vk_lut1d;
 	}
 
 	const uint64_t ulFocusAppId = s_pPipewireBuffer->gamescope_info.focus_appid;

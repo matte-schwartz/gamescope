@@ -50,6 +50,12 @@ struct pipewire_buffer {
 	{
 		return buffer == nullptr;
 	}
+	// The negotiated format is the 10 bit RGB one with PQ as its transfer function.
+	bool IsRGB10PQ() const
+	{
+		return video_info.format == SPA_VIDEO_FORMAT_xRGB_210LE &&
+		       video_info.transfer_function == SPA_VIDEO_TRANSFER_SMPTE2084;
+	}
 	// We pass the buffer to the steamcompmgr thread for copying. This is set
 	// to true if the buffer is currently owned by the steamcompmgr thread.
 	bool copying;
