@@ -270,6 +270,9 @@ struct colormapping_t
 displaycolorimetry_t lerp( const displaycolorimetry_t & a, const displaycolorimetry_t & b, float t );
 colormapping_t lerp( const colormapping_t & a, const colormapping_t & b, float t );
 
+// Linear per-channel night mode multiplier
+glm::vec3 nightmode_multiplier( const nightmode_t & nightmode );
+
 // These values are directly exposed to steam
 // Values must be stable over time
 enum ETonemapOperator

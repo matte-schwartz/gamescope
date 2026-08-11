@@ -584,6 +584,13 @@ inline glm::vec3 hsv_to_rgb( const glm::vec3 & hsv )
     return glm::vec3( 0 );
 }
 
+glm::vec3 nightmode_multiplier( const nightmode_t & nightmode )
+{
+    // amount and saturation are overdetermined but we separate the two as they conceptually represent
+    // different quantities, and this preserves forwards algorithmic compatibility
+    glm::vec3 nightModeMultHSV( nightmode.hue, clamp01( nightmode.saturation * nightmode.amount ), 1.f );
+    return glm::pow( hsv_to_rgb( nightModeMultHSV ), glm::vec3( 2.2f ) );
+}
 
 inline glm::vec3 rgb_to_hsv( const glm::vec3 & rgb )
 {
@@ -728,11 +735,7 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
         glm::mat3 dest_from_source = dest_from_xyz * xyz_from_source; // XYZ scaling for white point adjustment
 
         // Precalc night mode scalars & digital gain
-        // amount and saturation are overdetermined but we separate the two as they conceptually represent
-        // different quantities, and this preserves forwards algorithmic compatibility
-        glm::vec3 nightModeMultHSV( nightmode.hue, clamp01( nightmode.saturation * nightmode.amount ), 1.f );
-        glm::vec3 vMultLinear = glm::pow( hsv_to_rgb( nightModeMultHSV ), glm::vec3( 2.2f ) );
-        vMultLinear = vMultLinear * flGain;
+        glm::vec3 vMultLinear = nightmode_multiplier( nightmode ) * flGain;
 
         // Calculate the virtual white point adaptation
         glm::mat3x3 whitePointDestAdaptation = glm::mat3x3( 1.f ); // identity

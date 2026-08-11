@@ -74,6 +74,7 @@ gamescope::ConVar<float> cv_vr_trackpad_click_max_delta( "vr_trackpad_click_max_
 gamescope::ConVar<bool> cv_vr_debug_force_opaque( "vr_debug_force_opaque", false, "Force textures to be treated as opaque." );
 gamescope::ConVar<bool> cv_vr_nudge_to_visible( "vr_nudge_to_visible", false, "" );
 gamescope::ConVar<bool> cv_vr_nudge_to_visible_per_connector( "vr_nudge_to_visible_per_connector", false, "" );
+gamescope::ConVar<bool> cv_vr_nightmode_linear_tint( "vr_nightmode_linear_tint", true, "Apply night mode overlay tint as the linear-space multiplier. Disable if SteamVR tints in gamma space." );
 
 // Maximum interval between polling for VR events (normally paced by frame sync)
 gamescope::ConVar<uint32_t> cv_vr_poll_rate( "vr_poll_rate", 50ul, "Max time between input polls. In milliseconds." );
@@ -277,6 +278,8 @@ namespace gamescope
 
         void ForwardFramebuffer( COpenVRFb *pFb );
 
+        void UpdateColorTint( const glm::vec3 &vTint );
+
         vr::VROverlayHandle_t GetOverlay() const { return m_hOverlay; }
         vr::VROverlayHandle_t GetOverlayThumbnail() const { return m_hOverlayThumbnail; }
 
@@ -303,6 +306,8 @@ namespace gamescope
         uint32_t m_uSortOrder = 0;
         vr::VROverlayHandle_t m_hOverlay = vr::k_ulOverlayHandleInvalid;
         vr::VROverlayHandle_t m_hOverlayThumbnail = vr::k_ulOverlayHandleInvalid;
+
+        glm::vec3 m_vColorTint = { 1.f, 1.f, 1.f };
 
         std::mutex m_mutFbIds;
         Rc<COpenVRFb> m_pQueuedFbId;
@@ -1652,6 +1657,18 @@ namespace gamescope
         if ( bExplicitNonSteam )
             bNeedsFullComposite = false;
 
+        // Composite path already bakes night mode into the 3D LUT, tinting there would double-apply.
+        glm::vec3 vColorTint = { 1.f, 1.f, 1.f };
+        if ( !bNeedsFullComposite && g_ColorMgmt.pending.enabled )
+        {
+            vColorTint = nightmode_tint( g_ColorMgmt.pending.nightmode );
+            // SteamVR's tint space is undocumented, assume it multiplies after decoding to linear.
+            if ( cv_vr_nightmode_linear_tint )
+                vColorTint = glm::pow( vColorTint, glm::vec3( 2.2f ) );
+        }
+        for ( COpenVRPlane &plane : m_Planes )
+            plane.UpdateColorTint( vColorTint );
+
         if ( !bNeedsFullComposite )
         {
             bool bNeedsBacking = true;
@@ -2226,6 +2243,15 @@ namespace gamescope
         {
             Present( std::nullopt );
         }
+    }
+
+    void COpenVRPlane::UpdateColorTint( const glm::vec3 &vTint )
+    {
+        if ( m_vColorTint == vTint )
+            return;
+
+        m_vColorTint = vTint;
+        vr::VROverlay()->SetOverlayColor( m_hOverlay, vTint.r, vTint.g, vTint.b );
     }
 
     void COpenVRPlane::ForwardFramebuffer( COpenVRFb *pFb )
