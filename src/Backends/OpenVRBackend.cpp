@@ -247,6 +247,18 @@ namespace gamescope
         vr::SharedTextureHandle_t m_ulHandle = 0;
     };
 
+    static glm::vec3 CalcNightModeTint()
+    {
+        if ( !g_ColorMgmt.pending.enabled )
+            return glm::vec3( 1.f );
+
+        glm::vec3 vTint = nightmode_multiplier( g_ColorMgmt.pending.nightmode );
+        if ( !cv_vr_nightmode_linear_tint )
+            vTint = glm::pow( vTint, glm::vec3( 1.0f / 2.2f ) );
+
+        return vTint;
+    }
+
     // TODO: Merge with WaylandPlaneState
     struct OpenVRPlaneState
     {
@@ -977,6 +989,8 @@ namespace gamescope
             std::shared_ptr<COpenVRPlane> pOpenVRPlane = std::static_pointer_cast<COpenVRPlane>( pPlane );
             assert( pOpenVRPlane->GetOverlay() == hOverlay );
 
+            // Forwarded framebuffers never pass through the composite LUT, night mode reaches them only here.
+            pOpenVRPlane->UpdateColorTint( CalcNightModeTint() );
             pOpenVRPlane->ForwardFramebuffer( pVRFB );
             {
                 std::scoped_lock lock{ m_mutForwarderPlanes };
@@ -1657,18 +1671,6 @@ namespace gamescope
         if ( bExplicitNonSteam )
             bNeedsFullComposite = false;
 
-        // Composite path already bakes night mode into the 3D LUT, tinting there would double-apply.
-        glm::vec3 vColorTint = { 1.f, 1.f, 1.f };
-        if ( !bNeedsFullComposite && g_ColorMgmt.pending.enabled )
-        {
-            vColorTint = nightmode_tint( g_ColorMgmt.pending.nightmode );
-            // SteamVR's tint space is undocumented, assume it multiplies after decoding to linear.
-            if ( cv_vr_nightmode_linear_tint )
-                vColorTint = glm::pow( vColorTint, glm::vec3( 2.2f ) );
-        }
-        for ( COpenVRPlane &plane : m_Planes )
-            plane.UpdateColorTint( vColorTint );
-
         if ( !bNeedsFullComposite )
         {
             bool bNeedsBacking = true;
@@ -1765,6 +1767,11 @@ namespace gamescope
             for ( int i = 1; i < 8; i++ )
                 m_Planes[i].Present( nullptr );
         }
+
+        // Composite already applies night mode via the 3D LUT.
+        glm::vec3 vColorTint = bNeedsFullComposite ? glm::vec3( 1.f ) : CalcNightModeTint();
+        for ( COpenVRPlane &plane : m_Planes )
+            plane.UpdateColorTint( vColorTint );
 
         return 0;
     }
@@ -2250,8 +2257,16 @@ namespace gamescope
         if ( m_vColorTint == vTint )
             return;
 
+        vr::EVROverlayError err = vr::VROverlay()->SetOverlayColor( m_hOverlay, vTint.r, vTint.g, vTint.b );
+        if ( err != vr::VROverlayError_None )
+        {
+            // Keep the cache stale so the next present retries.
+            openvr_log.debugf( "SetOverlayColor on overlay %lx failed: %s", (unsigned long)m_hOverlay, vr::VROverlay()->GetOverlayErrorNameFromEnum( err ) );
+            return;
+        }
+
         m_vColorTint = vTint;
-        vr::VROverlay()->SetOverlayColor( m_hOverlay, vTint.r, vTint.g, vTint.b );
+        openvr_log.debugf( "Setting overlay %lx color tint: %f %f %f", (unsigned long)m_hOverlay, vTint.r, vTint.g, vTint.b );
     }
 
     void COpenVRPlane::ForwardFramebuffer( COpenVRFb *pFb )
