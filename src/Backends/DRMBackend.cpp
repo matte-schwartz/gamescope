@@ -774,7 +774,8 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsi
 	DRMPresentCtx *pCtx = reinterpret_cast<DRMPresentCtx *>( data );
 
 	// Make this const when we move into CDRMBackend.
-	GetBackend()->GetCurrentConnector()->PresentationFeedback().m_uCompletedPresents = pCtx->ulPendingFlipCount;
+	if ( g_DRM.pConnector )
+		g_DRM.pConnector->PresentationFeedback().m_uCompletedPresents = pCtx->ulPendingFlipCount;
 
 	if ( !g_DRM.pCRTC )
 		return;
