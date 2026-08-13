@@ -4031,10 +4031,8 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 
 	pick_primary_focus_and_override( &ctx->focus, ctx->focusControlWindow, vecPossibleFocusWindows, false, vecFocuscontrolAppIDs, ulKey, eStrategy );
 
-	if ( !ctx->focus.overrideWindowMouse )
-	{
-		ctx->focus.overrideWindowMouse = ctx->focus.overrideWindow;
-	}
+	// The VR mouse connector path below may pick a different mouse override.
+	ctx->focus.overrideWindowMouse = ctx->focus.overrideWindow;
 
 	if ( inputFocus == NULL )
 	{
