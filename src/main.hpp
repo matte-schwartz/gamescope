@@ -56,8 +56,25 @@ enum class GamescopeUpscaleScaler : uint32_t
     STRETCH,
 };
 
-extern GamescopeUpscaleFilter g_upscaleFilter;
-extern GamescopeUpscaleScaler g_upscaleScaler;
+struct UpscaleSettings_t
+{
+    GamescopeUpscaleFilter eFilter{};
+    GamescopeUpscaleScaler eScaler{};
+};
+
+// XXX(misyl): This still belongs in paint_window business logic rather than
+// being derived in the main loop.
+static constexpr UpscaleSettings_t GetUpscaleSettings(
+    bool bFocusIsSteam,
+    GamescopeUpscaleFilter eWantedFilter,
+    GamescopeUpscaleScaler eWantedScaler )
+{
+    if ( bFocusIsSteam )
+        return UpscaleSettings_t{ GamescopeUpscaleFilter::LINEAR, GamescopeUpscaleScaler::FIT };
+
+    return UpscaleSettings_t{ eWantedFilter, eWantedScaler };
+}
+
 extern GamescopeUpscaleFilter g_wantedUpscaleFilter;
 extern GamescopeUpscaleScaler g_wantedUpscaleScaler;
 extern int g_upscaleFilterSharpness;
