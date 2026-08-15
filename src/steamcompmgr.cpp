@@ -921,6 +921,22 @@ global_focus_t *GetCurrentMouseFocus()
 	return GetCurrentFocus();
 }
 
+// The focus whose focusWindow is w, ignoring the other window roles.
+// Guards w because a null one would match any focus without a window.
+global_focus_t *GetFocusForWindow( steamcompmgr_win_t *w )
+{
+	if ( !w )
+		return nullptr;
+
+	for ( auto &iter : g_VirtualConnectorFocuses )
+	{
+		if ( iter.second.focusWindow == w )
+			return &iter.second;
+	}
+
+	return nullptr;
+}
+
 uint32_t		currentOutputWidth, currentOutputHeight;
 int 			currentOutputRefresh;
 bool			currentHDROutput = false;
@@ -7384,8 +7400,10 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 								( pCurrentFocus->focusWindow && pCurrentFocus->focusWindow->isSteamStreamingClient && w->isSteamStreamingClientVideo ) )
 								&& !bMangoappSocketDisable;
 
-	bool bValidPreemptiveScale = reslistentry.pAcquirePoint && pCurrentFocus && w == pCurrentFocus->focusWindow && cv_upscale_preemptive;
-	bool bPreemptiveUpscale = bValidPreemptiveScale && newCommit->ShouldPreemptivelyUpscale( pCurrentFocus->eUpscaleFilter, pCurrentFocus->eUpscaleScaler );
+	// The window's own connector, not whichever one is current.
+	global_focus_t *pUpscaleFocus = GetFocusForWindow( w );
+	bool bValidPreemptiveScale = reslistentry.pAcquirePoint && pUpscaleFocus && cv_upscale_preemptive;
+	bool bPreemptiveUpscale = bValidPreemptiveScale && newCommit->ShouldPreemptivelyUpscale( pUpscaleFocus->eUpscaleFilter, pUpscaleFocus->eUpscaleScaler );
 
 	bool bKnownReady = false;
 
@@ -7405,8 +7423,8 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		overscanScaleRatio = 1.0f;
 		zoomScaleRatio = 1.0f;
 		globalScaleRatio = 1.0f;
-		upscaledFrameInfo.eUpscaleFilter = pCurrentFocus->eUpscaleFilter;
-		upscaledFrameInfo.eUpscaleScaler = pCurrentFocus->eUpscaleScaler;
+		upscaledFrameInfo.eUpscaleFilter = pUpscaleFocus->eUpscaleFilter;
+		upscaledFrameInfo.eUpscaleScaler = pUpscaleFocus->eUpscaleScaler;
 		paint_window_commit( newCommit, w, w, &upscaledFrameInfo, nullptr );
 		upscaledFrameInfo.useFSRLayer0 = upscaledFrameInfo.eUpscaleFilter == GamescopeUpscaleFilter::FSR;
 		upscaledFrameInfo.useNISLayer0 = upscaledFrameInfo.eUpscaleFilter == GamescopeUpscaleFilter::NIS;
