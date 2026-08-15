@@ -4203,6 +4203,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	pFocus->cursor = root_ctx->cursor.get();
 	pFocus->ulVirtualFocusKey = previousLocalFocus.ulVirtualFocusKey;
 	pFocus->pVirtualConnector = previousLocalFocus.pVirtualConnector;
+	pFocus->fadeWindow = previousLocalFocus.fadeWindow;
 	gameFocused = false;
 
 	focus_log.debugf( "Rerolling global focus..." );
