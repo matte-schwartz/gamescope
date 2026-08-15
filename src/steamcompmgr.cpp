@@ -843,6 +843,23 @@ bool focus_t::IsDirty()
 	return ulCurrentFocusSerial != GetFocusSerial();
 }
 
+enum HeldCommitTypes_t
+{
+	HELD_COMMIT_BASE,
+	HELD_COMMIT_FADE,
+
+	HELD_COMMIT_COUNT,
+};
+
+struct BaseLayerInfo_t
+{
+	float scale[2];
+	float offset[2];
+	float opacity;
+	GamescopeUpscaleFilter filter;
+	AlphaBlendingMode_t eAlphaBlendingMode = ALPHA_BLENDING_MODE_PREMULTIPLIED;
+};
+
 struct global_focus_t : public focus_t
 {
 	steamcompmgr_win_t	  	 		*keyboardFocusWindow;
@@ -1101,14 +1118,6 @@ bool steamcompmgr_window_should_refresh_switch( steamcompmgr_win_t *w )
 	return steamcompmgr_window_should_limit_fps( w );
 }
 
-
-enum HeldCommitTypes_t
-{
-	HELD_COMMIT_BASE,
-	HELD_COMMIT_FADE,
-
-	HELD_COMMIT_COUNT,
-};
 
 std::array<gamescope::Rc<commit_t>, HELD_COMMIT_COUNT> g_HeldCommits;
 bool g_bPendingFade = false;
@@ -2029,15 +2038,6 @@ void MouseCursor::updateCursorFeedback( bool bForce )
 	m_bCursorVisibleFeedback = bVisible;
 	m_needs_server_flush = true;
 }
-
-struct BaseLayerInfo_t
-{
-	float scale[2];
-	float offset[2];
-	float opacity;
-	GamescopeUpscaleFilter filter;
-	AlphaBlendingMode_t eAlphaBlendingMode = ALPHA_BLENDING_MODE_PREMULTIPLIED;
-};
 
 std::array< BaseLayerInfo_t, HELD_COMMIT_COUNT > g_CachedPlanes = {};
 
