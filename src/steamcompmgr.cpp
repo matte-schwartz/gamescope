@@ -2251,7 +2251,7 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
 }
 
 static void
-paint_window(steamcompmgr_win_t *w, steamcompmgr_win_t *scaleW, struct FrameInfo_t *frameInfo,
+paint_window(global_focus_t *pFocus, steamcompmgr_win_t *w, steamcompmgr_win_t *scaleW, struct FrameInfo_t *frameInfo,
 			  MouseCursor *cursor, PaintWindowFlags flags = 0, float flOpacityScale = 1.0f, steamcompmgr_win_t *fit = nullptr )
 {
 	gamescope::Rc<commit_t> lastCommit;
@@ -2356,7 +2356,7 @@ static void paint_pipewire()
 
 	const uint64_t ulFocusAppId = s_pPipewireBuffer->gamescope_info.focus_appid;
 
-	focus_t *pFocus = nullptr;
+	global_focus_t *pFocus = nullptr;
 	if ( ulFocusAppId )
 	{
 		static uint64_t s_ulLastFocusAppId = 0;
@@ -2368,7 +2368,8 @@ static void paint_pipewire()
 			s_ulLastFocusAppId = ulFocusAppId;
 		}
 
-		static focus_t s_PipewireFocus{};
+		// Synthetic focus for the capture stream, connector fields never populated.
+		static global_focus_t s_PipewireFocus{};
 		if ( s_PipewireFocus.IsDirty() || bAppIdChange )
 		{
 			std::vector<steamcompmgr_win_t *> vecPossibleFocusWindows = GetGlobalPossibleFocusWindows();
@@ -2416,14 +2417,14 @@ static void paint_pipewire()
 	currentOutputHeight = uHeight;
 
 	// Paint the windows we have onto the Pipewire stream.
-	paint_window( pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
+	paint_window( pFocus, pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
 
 	if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
-		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
+		paint_window( pFocus, pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 
 	if ( !ulFocusAppId && pFocus->overlayWindow && pFocus->overlayWindow->opacity )
 	{
-		paint_window( pFocus->overlayWindow, pFocus->overlayWindow, &frameInfo, nullptr, PaintWindowFlag::DrawBorders | PaintWindowFlag::NoFilter |
+		paint_window( pFocus, pFocus->overlayWindow, pFocus->overlayWindow, &frameInfo, nullptr, PaintWindowFlag::DrawBorders | PaintWindowFlag::NoFilter |
 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 )  );
 	}
 
@@ -2590,7 +2591,7 @@ paint_all( global_focus_t *pFocus, bool async )
 						if ( videow->isSteamStreamingClientVideo == true )
 						{
 							// TODO: also check matching AppID so we can have several pairs
-							paint_window(videow, videow, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders);
+							paint_window(pFocus, videow, videow, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders);
 							bHasVideoUnderlay = true;
 							break;
 						}
@@ -2602,7 +2603,7 @@ paint_all( global_focus_t *pFocus, bool async )
 				uint32_t flags = 0;
 				if ( !bHasVideoUnderlay )
 					flags |= PaintWindowFlag::BasePlane;
-				paint_window(w, w, &frameInfo, pFocus->cursor, flags);
+				paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, flags);
 				if ( pFocus == GetCurrentFocus() )
 					update_touch_scaling( &frameInfo );
 				
@@ -2620,7 +2621,7 @@ paint_all( global_focus_t *pFocus, bool async )
 						: ((currentTime - fadeOutStartTime) / (float)g_FadeOutDuration);
 			
 					paint_cached_base_layer(g_HeldCommits[HELD_COMMIT_FADE], g_CachedPlanes[HELD_COMMIT_FADE], &frameInfo, 1.0f - opacityScale, false);
-					paint_window(w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::FadeTarget | PaintWindowFlag::DrawBorders, opacityScale, override);
+					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::FadeTarget | PaintWindowFlag::DrawBorders, opacityScale, override);
 				}
 				else
 				{
@@ -2634,7 +2635,7 @@ paint_all( global_focus_t *pFocus, bool async )
 						}
 					}
 					// Just draw focused window as normal, be it Steam or the game
-					paint_window(w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, override);
+					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, override);
 
 					bool needsScaling = frameInfo.layers[0].scale.x < 0.999f && frameInfo.layers[0].scale.y < 0.999f;
 					frameInfo.useFSRLayer0 = g_upscaleFilter == GamescopeUpscaleFilter::FSR && needsScaling;
@@ -2667,7 +2668,7 @@ paint_all( global_focus_t *pFocus, bool async )
 	// as we will have too many layers. Better to be safe than sorry.
 	if ( override && w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane )
 	{
-		paint_window(override, w, &frameInfo, pFocus->cursor, PaintWindowFlag::NoFilter, 1.0f, override);
+		paint_window(pFocus, override, w, &frameInfo, pFocus->cursor, PaintWindowFlag::NoFilter, 1.0f, override);
 		// Don't update touch scaling for frameInfo. We don't ever make it our
 		// wlserver_mousefocus window.
 		//update_touch_scaling( &frameInfo );
@@ -2680,7 +2681,7 @@ paint_all( global_focus_t *pFocus, bool async )
 	{
 		if (externalOverlay->opacity)
 		{
-			paint_window(externalOverlay, externalOverlay, &frameInfo, pFocus->cursor, PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter |
+			paint_window(pFocus, externalOverlay, externalOverlay, &frameInfo, pFocus->cursor, PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter |
 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 ) );
 
 			if ( externalOverlay == pFocus->inputFocusWindow && pFocus == GetCurrentFocus() )
@@ -2692,7 +2693,7 @@ paint_all( global_focus_t *pFocus, bool async )
 	{
 		if (overlay && overlay->opacity )
 		{
-			paint_window(overlay, overlay, &frameInfo, pFocus->cursor, PaintWindowFlag::DrawBorders | PaintWindowFlag::NoFilter |
+			paint_window(pFocus, overlay, overlay, &frameInfo, pFocus->cursor, PaintWindowFlag::DrawBorders | PaintWindowFlag::NoFilter |
 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 )  );
 
 			if ( overlay == pFocus->inputFocusWindow && pFocus == GetCurrentFocus() )
@@ -2734,7 +2735,7 @@ paint_all( global_focus_t *pFocus, bool async )
 	{
 		if (notification->opacity)
 		{
-			paint_window(notification, notification, &frameInfo, pFocus->cursor, PaintWindowFlag::NotificationMode | PaintWindowFlag::NoFilter);
+			paint_window(pFocus, notification, notification, &frameInfo, pFocus->cursor, PaintWindowFlag::NotificationMode | PaintWindowFlag::NoFilter);
 		}
 	}
 
