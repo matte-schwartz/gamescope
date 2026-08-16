@@ -1908,6 +1908,22 @@ namespace gamescope
                 nNewOverlayVisibleCount,
                 m_bOverlayShown    ? "true" : "false",
                 m_bSceneAppVisible ? "true" : "false" );
+
+            // SteamVR can fail to grant a launching app overlay input focus,
+            // which would otherwise leave the previous connector current.
+            if ( bVisible )
+            {
+                COpenVRConnector *pOldKeyboardConnector = m_pBackend->m_pKeyboardFocusConnector.exchange( this );
+                COpenVRConnector *pOldMouseConnector = m_pBackend->m_pMouseFocusConnector.exchange( this );
+                if ( pOldKeyboardConnector != this || pOldMouseConnector != this )
+                {
+                    openvr_log.debugf( "Changing keyboard and mouse focus connector to %p", this );
+                    update_connector_display_info_wl( NULL );
+
+                    MakeFocusDirty();
+                    nudge_steamcompmgr();
+                }
+            }
         }
     }
 
