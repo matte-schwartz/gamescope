@@ -39,6 +39,7 @@ protocols = [
 	'gamescope-control.xml',
 	'gamescope-reshade.xml',
 	'gamescope-swapchain.xml',
+	'gamescope-limiter.xml',
 	'gamescope-private.xml',
 	'gamescope-action-binding.xml',
 
