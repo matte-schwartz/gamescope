@@ -6053,10 +6053,14 @@ T bit_cast(const J& src) {
 static void
 update_runtime_info()
 {
+	uint32_t limiter_enabled = g_nSteamCompMgrTargetFPS != 0 ? 1 : 0;
+
+	// The file is a legacy fallback for clients without gamescope_limiter.
+	wlserver_set_frame_limiter_state( limiter_enabled );
+
 	if ( g_nRuntimeInfoFd < 0 )
 		return;
 
-	uint32_t limiter_enabled = g_nSteamCompMgrTargetFPS != 0 ? 1 : 0;
 	pwrite( g_nRuntimeInfoFd, &limiter_enabled, sizeof( limiter_enabled ), 0 );
 }
 
@@ -6064,10 +6068,9 @@ static void
 init_runtime_info()
 {
 	const char *path = getenv( "GAMESCOPE_LIMITER_FILE" );
-	if ( !path )
-		return;
+	if ( path )
+		g_nRuntimeInfoFd = open( path, O_CREAT | O_RDWR , 0644 );
 
-	g_nRuntimeInfoFd = open( path, O_CREAT | O_RDWR , 0644 );
 	update_runtime_info();
 }
 
@@ -9482,6 +9485,8 @@ steamcompmgr_main(int argc, char **argv)
 #endif
 
 		update_vrr_atoms(root_ctx, false, &flush_root);
+
+		wlserver_flush_frame_limiter_state();
 
 		if (GetCurrentFocus() && GetCurrentFocus()->cursor)
 		{
