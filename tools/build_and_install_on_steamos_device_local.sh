@@ -16,4 +16,8 @@ steamvr stop
 
 envsudo meson install --skip-subprojects --tags runtime -C build.local
 
+# The install replaces the binary and drops its file capabilities, and
+# without CAP_SYS_NICE gamescope never asks for a high-priority queue.
+envsudo setcap 'cap_sys_nice=eip' /usr/bin/gamescope
+
 steamvr start
