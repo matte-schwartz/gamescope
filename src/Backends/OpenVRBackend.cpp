@@ -1,5 +1,6 @@
 #include <vector>
 #include <memory>
+#include <cinttypes>
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include <linux/input-event-codes.h>
@@ -1707,6 +1708,8 @@ namespace gamescope
                 return nullptr;
 
             m_pCompositeImages.push_back( std::move( pTexture ) );
+            openvr_log.infof( "composite image %zu modifier 0x%" PRIx64,
+                m_pCompositeImages.size() - 1, m_pCompositeImages.back()->dmabuf().modifier );
             return m_pCompositeImages.back();
         }
 
@@ -1823,6 +1826,9 @@ namespace gamescope
         }
         else
         {
+            const bool bTimeComposite = openvr_log.Enabled( LOG_DEBUG );
+            const uint64_t ulCompositeStart = bTimeComposite ? get_time_in_nanos() : 0;
+
             gamescope::Rc<CVulkanTexture> pCompositeTarget = GetCompositeTarget();
             std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false, pCompositeTarget, pCompositeTarget == nullptr );
             if ( !oCompositeResult )
@@ -1830,6 +1836,8 @@ namespace gamescope
                 openvr_log.errorf( "vulkan_composite failed" );
                 return -EINVAL;
             }
+
+            const uint64_t ulSubmitDone = bTimeComposite ? get_time_in_nanos() : 0;
 
             // A resize both clears the pool and makes the held image the
             // wrong size, so it cannot be presented.
@@ -1868,6 +1876,15 @@ namespace gamescope
 
                 m_oLastCompositeSeqNo = std::nullopt;
                 m_pLastCompositeImage = nullptr;
+            }
+
+            if ( bTimeComposite )
+            {
+                const uint64_t ulWaitDone = get_time_in_nanos();
+                openvr_log.debugf( "composite: submit %.2fms wait %.2fms mode %s",
+                    ( ulSubmitDone - ulCompositeStart ) / 1'000'000.0,
+                    ( ulWaitDone - ulSubmitDone ) / 1'000'000.0,
+                    pCompositeTarget == nullptr ? "shared" : ( cv_vr_composite_pipelined && pPresentImage != pCompositeTarget ? "pipelined" : "sync" ) );
             }
 
             FrameInfo_t::Layer_t compositeLayer{};

@@ -7359,6 +7359,8 @@ static TempUpscaleImage_t *GetTempUpscaleImage( global_focus_t *pFocus, uint32_t
 	imageFlags.bStorage = true;
 	imageFlags.bFlippable = true;
 	pTexture->BInit( g_nOutputWidth, g_nOutputHeight, 1, uDrmFormat, imageFlags );
+	xwm_log.infof( "upscale image %zu modifier 0x%" PRIx64,
+		pFocus->UpscaleImages.size(), pTexture->dmabuf().modifier );
 	TempUpscaleImage_t &image = pFocus->UpscaleImages.emplace_back( std::move( pTexture ), std::move( pTimeline ) );
 
 	return &image;
