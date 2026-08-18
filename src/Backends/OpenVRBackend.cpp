@@ -1826,11 +1826,48 @@ namespace gamescope
         }
         else
         {
+            // The cursor gets the same treatment as the passthrough path,
+            // SteamVR draws the pointer, so compositing the layer as well
+            // would paint a second cursor under the laser.
+            FrameInfo_t trimmedFrameInfo = *pFrameInfo;
+            bool bShouldHideCursor = true;
+            for ( int i = 0; i < trimmedFrameInfo.layerCount; i++ )
+            {
+                if ( trimmedFrameInfo.layers[i].zpos != g_zposCursor )
+                    continue;
+
+                bool bUsingPhysicalMouse = m_pBackend->GetCurrentMouseConnector() == this && !m_bUsingVRMouse;
+                if ( bUsingPhysicalMouse && !IsRelativeMouse() )
+                {
+                    vr::HmdVector2_t vMousePos =
+                    {
+                        static_cast<float>( -trimmedFrameInfo.layers[i].offset.x ),
+                        static_cast<float>( static_cast<float>( g_nOutputHeight ) + trimmedFrameInfo.layers[i].offset.y ),
+                    };
+
+                    vr::VROverlay()->SetOverlayCursorPositionOverride( GetPrimaryPlane()->GetOverlay(), &vMousePos );
+                    m_bCurrentlyOverridingPosition = true;
+
+                    bShouldHideCursor = false;
+                }
+
+                for ( int j = i; j < trimmedFrameInfo.layerCount - 1; j++ )
+                    trimmedFrameInfo.layers[j] = trimmedFrameInfo.layers[j + 1];
+                trimmedFrameInfo.layerCount--;
+                i--;
+            }
+
+            if ( bShouldHideCursor && m_bCurrentlyOverridingPosition )
+            {
+                vr::VROverlay()->ClearOverlayCursorPositionOverride( GetPrimaryPlane()->GetOverlay() );
+                m_bCurrentlyOverridingPosition = false;
+            }
+
             const bool bTimeComposite = openvr_log.Enabled( LOG_DEBUG );
             const uint64_t ulCompositeStart = bTimeComposite ? get_time_in_nanos() : 0;
 
             gamescope::Rc<CVulkanTexture> pCompositeTarget = GetCompositeTarget();
-            std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false, pCompositeTarget, pCompositeTarget == nullptr );
+            std::optional oCompositeResult = vulkan_composite( &trimmedFrameInfo, nullptr, false, pCompositeTarget, pCompositeTarget == nullptr );
             if ( !oCompositeResult )
             {
                 openvr_log.errorf( "vulkan_composite failed" );
