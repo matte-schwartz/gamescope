@@ -2064,6 +2064,7 @@ namespace PaintWindowFlag
 	static const uint32_t NoScale = 1u << 4;
 	static const uint32_t NoFilter = 1u << 5;
 	static const uint32_t CoverageMode = 1u << 6;
+	static const uint32_t ClampToOutput = 1u << 7;
 }
 using PaintWindowFlags = uint32_t;
 
@@ -2165,6 +2166,15 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
 	// Compositing ignores the base window's origin, so position overrides relative to it.
 	int32_t winOffsetX = w->GetGeometry().nX - scaleW->GetGeometry().nX;
 	int32_t winOffsetY = w->GetGeometry().nY - scaleW->GetGeometry().nY;
+
+	// Some clients position dropdowns slightly outside the output and close them
+	// if the window manager moves them. Leave their X11 geometry alone and clamp
+	// only the composited position.
+	if ( flags & PaintWindowFlag::ClampToOutput )
+	{
+		winOffsetX = std::max( winOffsetX, 0 );
+		winOffsetY = std::max( winOffsetY, 0 );
+	}
 
 	bool offset = ( ( winOffsetX || winOffsetY ) && w != scaleW );
 
@@ -2432,7 +2442,8 @@ static void paint_pipewire()
 		paint_window( pFocus->overrideUnderlayWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 
 	if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
-		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
+		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr,
+			PaintWindowFlag::NoFilter | PaintWindowFlag::ClampToOutput, 1.0f, pFocus->overrideWindow );
 
 	if ( !pFocus->focusWindow->isSteamStreamingClient )
 	{
@@ -2715,7 +2726,8 @@ paint_all( global_focus_t *pFocus, bool async )
 
 	if ( override && w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane )
 	{
-		paint_window(override, w, &frameInfo, pFocus->cursor, PaintWindowFlag::NoFilter, 1.0f, override);
+		paint_window(override, w, &frameInfo, pFocus->cursor,
+			PaintWindowFlag::NoFilter | PaintWindowFlag::ClampToOutput, 1.0f, override);
 		// Don't update touch scaling for frameInfo. We don't ever make it our
 		// wlserver_mousefocus window.
 		//update_touch_scaling( &frameInfo );
@@ -3045,7 +3057,8 @@ paint_all( global_focus_t *pFocus, bool async )
 				if ( pFocus->overrideUnderlayWindow && !pFocus->focusWindow->isSteamStreamingClient )
 					paint_window( pFocus->overrideUnderlayWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 				if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
-					paint_window( pFocus->overrideWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
+					paint_window( pFocus->overrideWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr,
+						PaintWindowFlag::NoFilter | PaintWindowFlag::ClampToOutput, 1.0f, pFocus->overrideWindow );
 				if ( !pFocus->focusWindow->isSteamStreamingClient )
 				{
 					for ( steamcompmgr_win_t *decoration : pFocus->decorationWindows )
