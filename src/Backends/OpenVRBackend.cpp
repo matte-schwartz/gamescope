@@ -65,6 +65,7 @@ static bool GetVulkanDeviceExtensionsRequired( VkPhysicalDevice pPhysicalDevice,
 gamescope::ConVar<bool> cv_vr_always_warp_cursor( "vr_always_warp_cursor", true, "Whether or not we should always warp the cursor, even if it is invisible so we get hover events." );
 gamescope::ConVar<bool> cv_vr_use_modifiers( "vr_use_modifiers", true, "Use DMA-BUF modifiers?" );
 gamescope::ConVar<bool> cv_vr_transparent_backing( "vr_transparent_backing", false, "Should backing be transparent or not?" );
+gamescope::ConVar<bool> cv_vr_composite_pipelined( "vr_composite_pipelined", true, "Present the previous frame's composite instead of waiting for this one." );
 gamescope::ConVar<bool> cv_vr_use_window_icons( "vr_use_window_icons", true, "Should we use window icons if they are available?" );
 gamescope::ConVar<bool> cv_vr_trackpad_hide_laser( "vr_trackpad_hide_laser", false, "Hide laser mouse when we are in trackpad mode." );
 gamescope::ConVar<bool> cv_vr_trackpad_relative_mouse_mode( "vr_trackpad_relative_mouse_mode", false, "If we are in relative mouse mode, treat the screen like a big trackpad?" );
@@ -442,6 +443,9 @@ namespace gamescope
         std::vector<gamescope::OwningRc<CVulkanTexture>> m_pCompositeImages;
         uint32_t m_uNextCompositeImage = 0;
         bool m_bWarnedCompositeExhaustion = false;
+        // Pipelining state, steamcompmgr thread only.
+        std::optional<uint64_t> m_oLastCompositeSeqNo;
+        gamescope::Rc<CVulkanTexture> m_pLastCompositeImage;
 
         bool m_bForbidTouchMode = false;
     };
@@ -1747,6 +1751,11 @@ namespace gamescope
 
         if ( !bNeedsFullComposite )
         {
+            // Drop the pipelined composite so re-entry does not show a stale
+            // frame, and the image returns to the pool.
+            m_oLastCompositeSeqNo = std::nullopt;
+            m_pLastCompositeImage = nullptr;
+
             bool bNeedsBacking = true;
             if ( pFrameInfo->layerCount >= 1 )
             {
@@ -1822,7 +1831,44 @@ namespace gamescope
                 return -EINVAL;
             }
 
-            vulkan_wait( *oCompositeResult, true );
+            // A resize both clears the pool and makes the held image the
+            // wrong size, so it cannot be presented.
+            if ( m_pLastCompositeImage &&
+                 ( m_pLastCompositeImage->width() != g_nOutputWidth ||
+                   m_pLastCompositeImage->height() != g_nOutputHeight ) )
+            {
+                m_oLastCompositeSeqNo = std::nullopt;
+                m_pLastCompositeImage = nullptr;
+            }
+
+            gamescope::Rc<CVulkanTexture> pPresentImage;
+            if ( cv_vr_composite_pipelined && pCompositeTarget != nullptr )
+            {
+                // Present the previous frame's finished composite and let this
+                // frame's run in the background, so the wait is off the
+                // deadline. The first frame has no predecessor and waits.
+                if ( m_oLastCompositeSeqNo && m_pLastCompositeImage != nullptr )
+                {
+                    vulkan_wait( *m_oLastCompositeSeqNo, true );
+                    pPresentImage = m_pLastCompositeImage;
+                }
+                else
+                {
+                    vulkan_wait( *oCompositeResult, true );
+                    pPresentImage = pCompositeTarget;
+                }
+
+                m_oLastCompositeSeqNo = oCompositeResult;
+                m_pLastCompositeImage = pCompositeTarget;
+            }
+            else
+            {
+                vulkan_wait( *oCompositeResult, true );
+                pPresentImage = pCompositeTarget != nullptr ? pCompositeTarget : vulkan_get_last_output_image( false, false );
+
+                m_oLastCompositeSeqNo = std::nullopt;
+                m_pLastCompositeImage = nullptr;
+            }
 
             FrameInfo_t::Layer_t compositeLayer{};
             compositeLayer.scale.x = 1.0;
@@ -1830,7 +1876,7 @@ namespace gamescope
             compositeLayer.opacity = 1.0;
             compositeLayer.zpos = g_zposBase;
 
-            compositeLayer.tex = pCompositeTarget != nullptr ? pCompositeTarget : vulkan_get_last_output_image( false, false );
+            compositeLayer.tex = pPresentImage;
             compositeLayer.applyColorMgmt = false;
 
             compositeLayer.filter = GamescopeUpscaleFilter::NEAREST;
