@@ -5584,6 +5584,8 @@ destroy_win(xwayland_ctx_t *ctx, Window id, bool gone, bool fade)
 			pFocus->inputFocusWindow = nullptr;
 		if (x11_win(pFocus->overlayWindow) == id && gone)
 			pFocus->overlayWindow = nullptr;
+		if (x11_win(pFocus->externalOverlayWindow) == id && gone)
+			pFocus->externalOverlayWindow = nullptr;
 		if (x11_win(pFocus->notificationWindow) == id && gone)
 			pFocus->notificationWindow = nullptr;
 		if (x11_win(pFocus->overrideWindow) == id && gone)
