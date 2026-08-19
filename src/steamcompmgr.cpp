@@ -256,6 +256,7 @@ static int setDMemMemoryLow(const char *cgroupPath, bool focused) {
 }
 
 static std::vector< steamcompmgr_win_t* > GetGlobalPossibleFocusWindows();
+static uint32_t mangoapp_msg_type_for_key( gamescope::VirtualConnectorKey_t ulKey );
 static bool
 pick_primary_focus_and_override(
 	focus_t *out,
@@ -3927,7 +3928,8 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 			}
 		}
 
-		if (w->isExternalOverlay)
+		// The per-ctx pick only serves untagged (legacy) mangoapps.
+		if (w->isExternalOverlay && w->uMangoappMsgType == 0)
 		{
 			if (w->opacity > maxOpacityExternal)
 			{
@@ -4420,7 +4422,20 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	// Pick overlay/notifications from root ctx
 	pFocus->overlayWindow = root_ctx->focus.overlayWindow;
-	pFocus->externalOverlayWindow = root_ctx->focus.externalOverlayWindow;
+	pFocus->externalOverlayWindow = nullptr;
+	if ( uint32_t uMsgType = mangoapp_msg_type_for_key( pFocus->ulVirtualFocusKey ) )
+	{
+		for ( steamcompmgr_win_t *w = root_ctx->list; w; w = w->xwayland().next )
+		{
+			if ( w->isExternalOverlay && w->uMangoappMsgType == uMsgType )
+			{
+				pFocus->externalOverlayWindow = w;
+				break;
+			}
+		}
+	}
+	if ( !pFocus->externalOverlayWindow )
+		pFocus->externalOverlayWindow = root_ctx->focus.externalOverlayWindow;
 	pFocus->notificationWindow = root_ctx->focus.notificationWindow;
 
 	if ( !pFocus->overlayWindow )
@@ -6135,7 +6150,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 				{
 					hasRepaintNonBasePlane = true;
 				}
-				if ( w == ctx->focus.externalOverlayWindow )
+				if ( w->isExternalOverlay )
 				{
 					hasRepaint = true;
 				}
@@ -6154,7 +6169,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 						maxOpacity = w->opacity;
 					}
 				}
-				if (w->isExternalOverlay)
+				if (w->isExternalOverlay && w->uMangoappMsgType == 0)
 				{
 					if (w->opacity >= maxOpacityExternal)
 					{
@@ -7569,14 +7584,42 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 
 	static bool bMangoappSocketDisable = env_to_bool( getenv( "GAMESCOPE_MANGOAPP_SOCKET_DISABLE" ));
 
-	// Whether or not to nudge mango app when this commit is done.
-	// Virtual-connector backends have no legacy type-1 reader; don't fill the queue.
+	xwayland_ctx_t *root_ctx = wlserver_get_xwayland_server( 0 )->ctx.get();
+
+	// Only send the legacy stream while an untagged mangoapp is there to drain it.
+	const bool bHasLegacyReader = !GetBackend()->UsesVirtualConnectors() ||
+								root_ctx->focus.externalOverlayWindow != nullptr;
 	const bool mango_nudge = pCurrentFocus && ( ( w == pCurrentFocus->focusWindow && !w->isSteamStreamingClient ) ||
 								( pCurrentFocus->focusWindow && pCurrentFocus->focusWindow->isSteamStreamingClient && w->isSteamStreamingClientVideo ) )
-								&& !bMangoappSocketDisable && !GetBackend()->UsesVirtualConnectors();
+								&& !bMangoappSocketDisable && bHasLegacyReader;
 
 	// The window's own connector, not whichever one is current.
 	global_focus_t *pUpscaleFocus = GetFocusForWindow( w );
+
+	// Typed stream of the window's own connector, only while a tagged
+	// mangoapp is there to drain it.
+	uint32_t uMangoMsgType = 0;
+	if ( !bMangoappSocketDisable )
+	{
+		global_focus_t *pMangoFocus = nullptr;
+		if ( pUpscaleFocus && !w->isSteamStreamingClient )
+			pMangoFocus = pUpscaleFocus;
+		else if ( w->isSteamStreamingClientVideo )
+		{
+			// The streaming video plane feeds the connector focusing its client.
+			for ( auto &iter : g_VirtualConnectorFocuses )
+			{
+				if ( iter.second.focusWindow && iter.second.focusWindow->isSteamStreamingClient )
+				{
+					pMangoFocus = &iter.second;
+					break;
+				}
+			}
+		}
+		if ( pMangoFocus && pMangoFocus->externalOverlayWindow )
+			uMangoMsgType = pMangoFocus->externalOverlayWindow->uMangoappMsgType;
+	}
+
 	bool bValidPreemptiveScale = reslistentry.pAcquirePoint && pUpscaleFocus && cv_upscale_preemptive;
 	bool bPreemptiveUpscale = bValidPreemptiveScale && newCommit->ShouldPreemptivelyUpscale( pUpscaleFocus->eUpscaleFilter, pUpscaleFocus->eUpscaleScaler );
 
@@ -7694,7 +7737,7 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 
 	gpuvis_trace_printf( "pushing wait for commit %lu win %lx", newCommit->commitID, w->type == steamcompmgr_win_type_t::XWAYLAND ? w->xwayland().id : 0 );
 	{
-		newCommit->SetFence( fence, mango_nudge, 0, doneCommits );
+		newCommit->SetFence( fence, mango_nudge, uMangoMsgType, doneCommits );
 		if ( bKnownReady )
 			newCommit->Signal();
 		else
@@ -8630,7 +8673,7 @@ struct MangoappInstance_t
 static std::unordered_map<gamescope::VirtualConnectorKey_t, MangoappInstance_t> s_MangoappInstances;
 static uint32_t s_uNextMangoappMsgType = k_uMangoappFirstConnectorMsgType;
 
-uint32_t mangoapp_msg_type_for_key( gamescope::VirtualConnectorKey_t ulKey )
+static uint32_t mangoapp_msg_type_for_key( gamescope::VirtualConnectorKey_t ulKey )
 {
 	auto iter = s_MangoappInstances.find( ulKey );
 	return iter != s_MangoappInstances.end() ? iter->second.uMsgType : 0;
@@ -8751,6 +8794,35 @@ static void publish_mangoapp_snapshot()
 	g_uCurrentBasePlaneCommitID = pFocus->ulBasePlaneCommitID;
 	g_uCurrentBasePlaneAppID = pFocus->uBasePlaneAppID;
 	g_bCurrentBasePlaneIsFifo = pFocus->bBasePlaneIsFifo;
+}
+
+static void publish_mangoapp_connector_snapshots()
+{
+	if ( !GetBackend()->UsesVirtualConnectors() )
+		return;
+
+	std::unordered_map<uint32_t, MangoappSnapshot_t> snapshots;
+	for ( auto &iter : g_VirtualConnectorFocuses )
+	{
+		uint32_t uMsgType = mangoapp_msg_type_for_key( iter.first );
+		if ( !uMsgType )
+			continue;
+
+		global_focus_t *pFocus = &iter.second;
+		snapshots[ uMsgType ] = MangoappSnapshot_t
+		{
+			.nPid = pFocus->nFocusWindowPid,
+			.bFSRActive = pFocus->bFSRActive,
+			.uFSRSharpness = (uint8_t) g_upscaleFilterSharpness,
+			.pEngineName = pFocus->pFocusWindowEngine,
+			.bSteamFocused = window_is_steam( pFocus->inputFocusWindow ),
+			.bAppWantsHDR = g_bAppWantsHDRCached,
+			.uOutputWidth = g_nOutputWidth,
+			.uOutputHeight = g_nOutputHeight,
+			.nOutputRefreshmHz = g_nOutputRefresh,
+		};
+	}
+	mangoapp_set_connector_snapshots( std::move( snapshots ) );
 }
 
 void
@@ -9598,6 +9670,7 @@ steamcompmgr_main(int argc, char **argv)
 		}
 
 		publish_mangoapp_snapshot();
+		publish_mangoapp_connector_snapshots();
 
 		if ( bIsVBlankFromTimer )
 		{
