@@ -4982,6 +4982,9 @@ handle_desktop_window(steamcompmgr_win_t *w)
 	}
 }
 
+// A tag anywhere proves the installed mangoapp honors MANGOAPP_MSG_TYPE.
+static bool s_bSeenMangoappTag = false;
+
 static void
 map_win(xwayland_ctx_t* ctx, Window id, unsigned long sequence)
 {
@@ -5038,6 +5041,8 @@ map_win(xwayland_ctx_t* ctx, Window id, unsigned long sequence)
 	w->isOverlay = get_prop(ctx, w->xwayland().id, ctx->atoms.overlayAtom, 0);
 	w->isExternalOverlay = get_prop(ctx, w->xwayland().id, ctx->atoms.externalOverlayAtom, 0);
 	w->uMangoappMsgType = get_prop(ctx, w->xwayland().id, ctx->atoms.mangoappMsgTypeAtom, 0);
+	if (w->uMangoappMsgType)
+		s_bSeenMangoappTag = true;
 
 	// misyl: Disable appID for overlay types, as parts of the code don't expect that focus-wise.
 	// Fixes mangoapp usage when nested, and not in SteamOS.
@@ -6297,6 +6302,8 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		if (w)
 		{
 			w->uMangoappMsgType = get_prop(ctx, w->xwayland().id, ctx->atoms.mangoappMsgTypeAtom, 0);
+			if (w->uMangoappMsgType)
+				s_bSeenMangoappTag = true;
 			MakeFocusDirty();
 		}
 	}
@@ -7563,9 +7570,10 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 	static bool bMangoappSocketDisable = env_to_bool( getenv( "GAMESCOPE_MANGOAPP_SOCKET_DISABLE" ));
 
 	// Whether or not to nudge mango app when this commit is done.
+	// Virtual-connector backends have no legacy type-1 reader; don't fill the queue.
 	const bool mango_nudge = pCurrentFocus && ( ( w == pCurrentFocus->focusWindow && !w->isSteamStreamingClient ) ||
 								( pCurrentFocus->focusWindow && pCurrentFocus->focusWindow->isSteamStreamingClient && w->isSteamStreamingClientVideo ) )
-								&& !bMangoappSocketDisable;
+								&& !bMangoappSocketDisable && !GetBackend()->UsesVirtualConnectors();
 
 	// The window's own connector, not whichever one is current.
 	global_focus_t *pUpscaleFocus = GetFocusForWindow( w );
@@ -8599,7 +8607,8 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 		waitThread.detach();
 	}
 
-	if ( g_bLaunchMangoapp )
+	// Virtual-connector backends spawn one mangoapp per connector instead.
+	if ( g_bLaunchMangoapp && !GetBackend()->UsesVirtualConnectors() )
 	{
 		char *ppMangoappArgv[] = { (char *)"mangoapp", NULL };
 		gamescope::Process::SpawnProcessInWatchdog( ppMangoappArgv, true );
@@ -8610,6 +8619,123 @@ static gamescope::CTimerFunction g_FPSLimitVRRTimer{ []
 {
 	g_FPSLimitVRRTimer.DisarmTimer();
 }};
+
+struct MangoappInstance_t
+{
+	uint32_t uMsgType = 0;
+	pid_t nReaperPid = -1;
+};
+
+// Key -> spawned mangoapp. Steamcompmgr thread only.
+static std::unordered_map<gamescope::VirtualConnectorKey_t, MangoappInstance_t> s_MangoappInstances;
+static uint32_t s_uNextMangoappMsgType = k_uMangoappFirstConnectorMsgType;
+
+uint32_t mangoapp_msg_type_for_key( gamescope::VirtualConnectorKey_t ulKey )
+{
+	auto iter = s_MangoappInstances.find( ulKey );
+	return iter != s_MangoappInstances.end() ? iter->second.uMsgType : 0;
+}
+
+static void UpdateMangoappInstances()
+{
+	if ( !g_bLaunchMangoapp || !GetBackend()->UsesVirtualConnectors() )
+		return;
+
+	// A stock mangoapp ignores MANGOAPP_MSG_TYPE, so per-connector spawns
+	// would degenerate into identical instances splitting one stream.
+	static bool s_bStockMangoapp = false;
+	static uint64_t s_ulFirstUntaggedPickTime = 0;
+	static constexpr uint64_t k_ulMangoappTagGrace = 5'000'000'000ul;
+
+	if ( s_bStockMangoapp )
+		return;
+
+	if ( !s_bSeenMangoappTag )
+	{
+		// A patched mangoapp tags before marking itself an external overlay,
+		// so a standing untagged pick means a stock build.
+		steamcompmgr_win_t *pOverlay = wlserver_get_xwayland_server( 0 )->ctx->focus.externalOverlayWindow;
+		if ( pOverlay && pOverlay->uMangoappMsgType == 0 )
+		{
+			uint64_t now = get_time_in_nanos();
+			if ( !s_ulFirstUntaggedPickTime )
+				s_ulFirstUntaggedPickTime = now;
+			if ( now - s_ulFirstUntaggedPickTime > k_ulMangoappTagGrace )
+			{
+				// The instance already reads the legacy stream, let it stand
+				// alone, unmanaged like the pre-connector spawn.
+				xwm_log.infof( "mangoapp never tagged a window, assuming a stock build" );
+				s_bStockMangoapp = true;
+				s_MangoappInstances.clear();
+				return;
+			}
+		}
+		else
+		{
+			s_ulFirstUntaggedPickTime = 0;
+		}
+	}
+
+	for ( const auto &iter : g_VirtualConnectorFocuses )
+	{
+		// One probe instance until a tag proves the build is patched.
+		if ( !s_bSeenMangoappTag && !s_MangoappInstances.empty() )
+			break;
+
+		// Steam draws its own overlays and gamescope never composites them, so
+		// an instance here would have nowhere to appear.
+		if ( gamescope::VirtualConnectorKeyIsSteam( iter.first ) )
+			continue;
+
+		if ( s_MangoappInstances.contains( iter.first ) )
+			continue;
+
+		uint32_t uMsgType = s_uNextMangoappMsgType++;
+
+		// A previous run may have left messages on this type, so clear it
+		// before the instance that would read them exists.
+		mangoapp_drop_stream( uMsgType );
+
+		char *ppMangoappArgv[] = { (char *)"mangoapp", NULL };
+		pid_t nPid = gamescope::Process::SpawnProcessInWatchdog( ppMangoappArgv, true, [ uMsgType ]()
+		{
+			char szMsgType[ 16 ];
+			snprintf( szMsgType, sizeof( szMsgType ), "%u", uMsgType );
+			setenv( "MANGOAPP_MSG_TYPE", szMsgType, 1 );
+		});
+		if ( nPid < 0 )
+		{
+			// Leave the key unmapped so the next pass tries again.
+			xwm_log.errorf( "Failed to spawn mangoapp for virtual connector key 0x%lx", (unsigned long) iter.first );
+			continue;
+		}
+
+		s_MangoappInstances[ iter.first ] = MangoappInstance_t{ .uMsgType = uMsgType, .nReaperPid = nPid };
+	}
+
+	for ( auto iter = s_MangoappInstances.begin(); iter != s_MangoappInstances.end(); )
+	{
+		if ( !g_VirtualConnectorFocuses.contains( iter->first ) )
+		{
+			pid_t nReaperPid = iter->second.nReaperPid;
+			gamescope::Process::KillProcess( nReaperPid, SIGTERM );
+			std::thread reapThread([ nReaperPid ]()
+			{
+				pthread_setname_np( pthread_self(), "gamescope-reap" );
+				gamescope::Process::WaitForChild( nReaperPid );
+			});
+			reapThread.detach();
+
+			// Nothing drains this type once its instance is gone.
+			mangoapp_drop_stream( iter->second.uMsgType );
+			iter = s_MangoappInstances.erase( iter );
+		}
+		else
+		{
+			++iter;
+		}
+	}
+}
 
 // mangoapp_update also runs on the image waiter thread, so publish plain
 // globals here rather than have it walk the focus.
@@ -9010,6 +9136,8 @@ steamcompmgr_main(int argc, char **argv)
 					}
 				}
 			}
+
+			UpdateMangoappInstances();
 
 			for ( auto &iter : g_VirtualConnectorFocuses )
 			{

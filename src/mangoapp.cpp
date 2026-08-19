@@ -47,6 +47,24 @@ void init_mangoapp(){
     inited = true;
 }
 
+static std::mutex s_FrameTimeMutex;
+static std::unordered_map<uint32_t, uint64_t> s_LastFrameTimes;
+
+// The queue outlives gamescope and msg types start over every run, so a type
+// left with unread messages feeds them to the next session's instance.
+void mangoapp_drop_stream( uint32_t uMsgType )
+{
+    if (!inited)
+        init_mangoapp();
+
+    uint8_t rawMsg[1024];
+    while (msgrcv(msgid, rawMsg, sizeof(rawMsg) - sizeof(long), uMsgType, IPC_NOWAIT | MSG_NOERROR) >= 0)
+        ;
+
+    std::unique_lock lock( s_FrameTimeMutex );
+    s_LastFrameTimes.erase( uMsgType );
+}
+
 void mangoapp_set_connector_snapshots( std::unordered_map<uint32_t, MangoappSnapshot_t> snapshots )
 {
     std::unique_lock lock( s_SnapshotMutex );
@@ -103,9 +121,6 @@ void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uin
 
 void mangoapp_nudge_app_frame( uint32_t uMsgType )
 {
-    static std::mutex s_FrameTimeMutex;
-    static std::unordered_map<uint32_t, uint64_t> s_LastFrameTimes;
-
     uint64_t now = get_time_in_nanos();
     uint64_t frametime;
     {
