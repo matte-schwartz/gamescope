@@ -1303,6 +1303,9 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 	// This is the seq no of the command buffer we are going to submit.
 	const uint64_t nextSeqNo = lastSubmissionSeqNo + 1;
 
+	for ( uint32_t uIndex : cmdBuffer->GetUsedDescriptorSets() )
+		m_descriptorSetSeqNos[ uIndex ] = nextSeqNo;
+
 	std::vector<VkSemaphore> pSignalSemaphores;
 	std::vector<uint64_t> ulSignalPoints;
 
@@ -1354,6 +1357,35 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 	return nextSeqNo;
 }
 
+VkDescriptorSet CVulkanDevice::descriptorSet( CVulkanCmdBuffer *pCmdBuffer )
+{
+	const uint32_t uIndex = m_currentDescriptorSet;
+	m_currentDescriptorSet = ( m_currentDescriptorSet + 1 ) % m_descriptorSets.size();
+
+	// If the submission that last wrote this set has not retired, updating the
+	// set changes what an in-flight dispatch samples. Wait it out, in practice
+	// the pool is deep enough that this never blocks. Not wait(), whose ring
+	// reset would clobber constants this recording has already uploaded.
+	if ( const uint64_t ulSeqNo = m_descriptorSetSeqNos[ uIndex ] )
+	{
+		uint64_t ulCompleted = 0;
+		vk_check( vk.GetSemaphoreCounterValue( device(), m_scratchTimelineSemaphore, &ulCompleted ) );
+		if ( ulCompleted < ulSeqNo )
+		{
+			VkSemaphoreWaitInfo waitInfo = {
+				.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+				.semaphoreCount = 1,
+				.pSemaphores = &m_scratchTimelineSemaphore,
+				.pValues = &ulSeqNo,
+			};
+			vk_check( vk.WaitSemaphores( device(), &waitInfo, ~0ull ) );
+		}
+	}
+
+	pCmdBuffer->GetUsedDescriptorSets().push_back( uIndex );
+	return m_descriptorSets[ uIndex ];
+}
+
 uint64_t CVulkanDevice::submit( std::unique_ptr<CVulkanCmdBuffer> cmdBuffer)
 {
 	uint64_t nextSeqNo = submitInternal(cmdBuffer.get());
@@ -1365,6 +1397,12 @@ void CVulkanDevice::garbageCollect( void )
 {
 	uint64_t currentSeqNo;
 	vk_check( vk.GetSemaphoreCounterValue(device(), m_scratchTimelineSemaphore, &currentSeqNo) );
+
+	// Waits on stale seq nos never take the reset branch in wait(), so with
+	// several connectors in flight the ring only wrapped via the overflow
+	// stall. Reclaim it here whenever the GPU has fully caught up.
+	if ( currentSeqNo == m_submissionSeqNo )
+		m_uploadBufferOffset = 0;
 
 	resetCmdBuffers(currentSeqNo);
 }
@@ -1547,6 +1585,7 @@ void CVulkanCmdBuffer::reset()
 {
 	vk_check( m_device->vk.ResetCommandBuffer(m_cmdBuffer, 0) );
 	m_textureRefs.clear();
+	m_usedDescriptorSets.clear();
 	m_textureState.clear();
 
 	m_ExternalDependencies.clear();
@@ -1649,7 +1688,7 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 	prepareDestImage(m_target);
 	insertBarrier();
 
-	VkDescriptorSet descriptorSet = m_device->descriptorSet();
+	VkDescriptorSet descriptorSet = m_device->descriptorSet( this );
 
 	std::array<VkWriteDescriptorSet, 7> writeDescriptorSets;
 	std::array<VkDescriptorImageInfo, VKR_SAMPLER_SLOTS> imageDescriptors = {};

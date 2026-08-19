@@ -787,12 +787,7 @@ public:
 	void wait(uint64_t sequence, bool reset = true);
 	void waitIdle(bool reset = true);
 	void garbageCollect();
-	inline VkDescriptorSet descriptorSet()
-	{
-		VkDescriptorSet ret = m_descriptorSets[m_currentDescriptorSet];
-		m_currentDescriptorSet = (m_currentDescriptorSet + 1) % m_descriptorSets.size();
-		return ret;
-	}
+	VkDescriptorSet descriptorSet( CVulkanCmdBuffer *pCmdBuffer );
 
 	std::shared_ptr<VulkanTimelineSemaphore_t> CreateTimelineSemaphore( uint64_t ulStartingPoint, bool bShared = false );
 	std::shared_ptr<VulkanTimelineSemaphore_t> ImportTimelineSemaphore( gamescope::CTimeline *pTimeline );
@@ -895,6 +890,9 @@ protected:
 	// vkQueueWaitIdle after each submit.
 	// should be moved to the output if we are going to support multiple outputs
 	std::array<VkDescriptorSet, k_uMaxConcurrentSubmits * 3> m_descriptorSets;
+	// Seq no of the last submission using each set, so the round robin never
+	// rewrites a set a dispatch still reads from.
+	std::array<uint64_t, k_uMaxConcurrentSubmits * 3> m_descriptorSetSeqNos{};
 	uint32_t m_currentDescriptorSet = 0;
 
 	VkBuffer m_uploadBuffer;
@@ -957,6 +955,7 @@ public:
 	void bindPipeline(VkPipeline pipeline);
 	void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1);
 	void copyImage(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst);
+	std::vector<uint32_t> &GetUsedDescriptorSets() { return m_usedDescriptorSets; }
 	void copyBufferToImage(VkBuffer buffer, VkDeviceSize offset, uint32_t stride, gamescope::Rc<CVulkanTexture> dst);
 
 
@@ -984,6 +983,7 @@ private:
 
 	// Per Use State
 	std::vector<gamescope::Rc<CVulkanTexture>> m_textureRefs;
+	std::vector<uint32_t> m_usedDescriptorSets;
 	std::unordered_map<CVulkanTexture *, TextureState> m_textureState;
 
 	// Draw State
