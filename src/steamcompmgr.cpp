@@ -5843,10 +5843,14 @@ T bit_cast(const J& src) {
 static void
 update_runtime_info()
 {
+	uint32_t limiter_enabled = g_nSteamCompMgrTargetFPS != 0 ? 1 : 0;
+
+	// The file is a legacy fallback for clients without gamescope_limiter.
+	wlserver_set_frame_limiter_state( limiter_enabled );
+
 	if ( g_nRuntimeInfoFd < 0 )
 		return;
 
-	uint32_t limiter_enabled = g_nSteamCompMgrTargetFPS != 0 ? 1 : 0;
 	pwrite( g_nRuntimeInfoFd, &limiter_enabled, sizeof( limiter_enabled ), 0 );
 }
 
@@ -5854,10 +5858,9 @@ static void
 init_runtime_info()
 {
 	const char *path = getenv( "GAMESCOPE_LIMITER_FILE" );
-	if ( !path )
-		return;
+	if ( path )
+		g_nRuntimeInfoFd = open( path, O_CREAT | O_RDWR , 0644 );
 
-	g_nRuntimeInfoFd = open( path, O_CREAT | O_RDWR , 0644 );
 	update_runtime_info();
 }
 
@@ -7039,22 +7042,18 @@ void handle_done_commits_xwayland( xwayland_ctx_t *ctx, bool vblank, uint64_t vb
 	// very fast loop yes
 	for ( auto& entry : ctx->doneCommits.listCommitsDone )
 	{
-		bool entry_vblank = vblank;
-
-		if ( GetBackend()->GetCurrentConnector() && GetBackend()->GetCurrentConnector()->IsVRRActive() )
+		steamcompmgr_win_t *entry_win = nullptr;
+		for ( steamcompmgr_win_t *w = ctx->list; w; w = w->xwayland().next )
 		{
-			for ( steamcompmgr_win_t *w = ctx->list; w; w = w->xwayland().next )
-			{
-				if (w->seq != entry.winSeq)
-					continue;
+			if (w->seq != entry.winSeq)
+				continue;
 
-				entry_vblank = entry_vblank && steamcompmgr_should_vblank_window( true, vblank_idx, w, now );
-			}
+			entry_win = w;
+			break;
 		}
-		else
-		{
-			entry_vblank = entry_vblank && steamcompmgr_should_vblank_window( true, vblank_idx );
-		}
+
+		// Only pace windows the FPS limiter covers.
+		const bool entry_vblank = vblank && steamcompmgr_should_vblank_window( entry_win, vblank_idx, now );
 
 		if (entry.fifo && (!entry_vblank || fifo_win_seqs.count(entry.winSeq) > 0))
 		{
@@ -7074,16 +7073,10 @@ void handle_done_commits_xwayland( xwayland_ctx_t *ctx, bool vblank, uint64_t vb
 			continue;
 		}
 
-		for ( steamcompmgr_win_t *w = ctx->list; w; w = w->xwayland().next )
+		if ( entry_win && handle_done_commit(entry_win, ctx, entry.commitID, entry.earliestPresentTime, entry.earliestLatchTime) )
 		{
-			if (w->seq != entry.winSeq)
-				continue;
-			if (handle_done_commit(w, ctx, entry.commitID, entry.earliestPresentTime, entry.earliestLatchTime))
-			{
-				if (entry.fifo)
-					fifo_win_seqs.insert(entry.winSeq);
-				break;
-			}
+			if (entry.fifo)
+				fifo_win_seqs.insert(entry.winSeq);
 		}
 	}
 
@@ -7108,12 +7101,23 @@ void handle_done_commits_xdg( bool vblank, uint64_t vblank_idx )
 
 	uint64_t now = get_time_in_nanos();
 
-	vblank = vblank && steamcompmgr_should_vblank_window( true, vblank_idx );
-
 	// very fast loop yes
 	for ( auto& entry : g_steamcompmgr_xdg_done_commits.listCommitsDone )
 	{
-		if (entry.fifo && (!vblank || fifo_win_seqs.count(entry.winSeq) > 0))
+		steamcompmgr_win_t *entry_win = nullptr;
+		for (const auto& xdg_win : g_steamcompmgr_xdg_wins)
+		{
+			if (xdg_win->seq != entry.winSeq)
+				continue;
+
+			entry_win = xdg_win.get();
+			break;
+		}
+
+		// Only pace windows the FPS limiter covers.
+		const bool entry_vblank = vblank && steamcompmgr_should_vblank_window( entry_win, vblank_idx, now );
+
+		if (entry.fifo && (!entry_vblank || fifo_win_seqs.count(entry.winSeq) > 0))
 		{
 			commits_before_their_time.push_back( entry );
 			continue;
@@ -7131,16 +7135,10 @@ void handle_done_commits_xdg( bool vblank, uint64_t vblank_idx )
 			break;
 		}
 
-		for (const auto& xdg_win : g_steamcompmgr_xdg_wins)
+		if ( entry_win && handle_done_commit(entry_win, nullptr, entry.commitID, entry.earliestPresentTime, entry.earliestLatchTime) )
 		{
-			if (xdg_win->seq != entry.winSeq)
-				continue;
-			if (handle_done_commit(xdg_win.get(), nullptr, entry.commitID, entry.earliestPresentTime, entry.earliestLatchTime))
-			{
-				if (entry.fifo)
-					fifo_win_seqs.insert(entry.winSeq);
-				break;
-			}
+			if (entry.fifo)
+				fifo_win_seqs.insert(entry.winSeq);
 		}
 	}
 
@@ -7944,6 +7942,7 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
 
 	ctx->atoms.gamescopeXWaylandModeControl = XInternAtom( ctx->dpy, "GAMESCOPE_XWAYLAND_MODE_CONTROL", false );
 	ctx->atoms.gamescopeFPSLimit = XInternAtom( ctx->dpy, "GAMESCOPE_FPS_LIMIT", false );
+	ctx->atoms.gamescopeLimiterFeedback = XInternAtom( ctx->dpy, "GAMESCOPE_LIMITER_FEEDBACK", false );
 	ctx->atoms.gamescopeDynamicRefresh[gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL] = XInternAtom( ctx->dpy, "GAMESCOPE_DYNAMIC_REFRESH", false );
 	ctx->atoms.gamescopeDynamicRefresh[gamescope::GAMESCOPE_SCREEN_TYPE_EXTERNAL] = XInternAtom( ctx->dpy, "GAMESCOPE_DYNAMIC_REFRESH_EXTERNAL", false );
 	ctx->atoms.gamescopeLowLatency = XInternAtom( ctx->dpy, "GAMESCOPE_LOW_LATENCY", false );
@@ -8052,6 +8051,9 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
 
 	uint32_t unVROverlayForwardingSupported = GetBackend()->SupportsVROverlayForwarding() ? 3 : 0;
 	XChangeProperty(ctx->dpy, ctx->root, ctx->atoms.gamescopeVROverlayForwarding, XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&unVROverlayForwardingSupported, 1 );
+
+	uint32_t uLimiterFeedback = wlserver_get_frame_limiter_state();
+	XChangeProperty(ctx->dpy, ctx->root, ctx->atoms.gamescopeLimiterFeedback, XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&uLimiterFeedback, 1 );
 
 	XGrabServer(ctx->dpy);
 
@@ -8168,6 +8170,34 @@ void update_vrr_atoms(xwayland_ctx_t *root_ctx, bool force, bool* needs_flush = 
 			(unsigned char *)&enabled_value, 1 );
 		if (needs_flush)
 			*needs_flush = true;
+	}
+}
+
+static uint32_t g_uLimiterFeedback_CachedValue = 0;
+
+void update_limiter_atoms(xwayland_ctx_t *root_ctx, bool force, bool* needs_flush = nullptr)
+{
+	uint32_t uLimiterFeedback = wlserver_get_frame_limiter_state();
+	if ( uLimiterFeedback == g_uLimiterFeedback_CachedValue && !force )
+		return;
+
+	g_uLimiterFeedback_CachedValue = uLimiterFeedback;
+
+	gamescope_xwayland_server_t *server = NULL;
+	for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)
+	{
+		XChangeProperty(server->ctx->dpy, server->ctx->root, server->ctx->atoms.gamescopeLimiterFeedback, XA_CARDINAL, 32, PropModeReplace,
+			(unsigned char *)&uLimiterFeedback, 1 );
+
+		if (server->ctx.get() == root_ctx)
+		{
+			if (needs_flush)
+				*needs_flush = true;
+		}
+		else
+		{
+			XFlush(server->ctx->dpy);
+		}
 	}
 }
 
@@ -8577,6 +8607,7 @@ steamcompmgr_main(int argc, char **argv)
 	}
 
 	update_vrr_atoms(root_ctx, true);
+	update_limiter_atoms(root_ctx, true);
 	update_mode_atoms(root_ctx);
 	XFlush(root_ctx->dpy);
 
@@ -9279,6 +9310,10 @@ steamcompmgr_main(int argc, char **argv)
 		}
 
 		update_vrr_atoms(root_ctx, false, &flush_root);
+
+		wlserver_flush_frame_limiter_state();
+
+		update_limiter_atoms(root_ctx, false, &flush_root);
 
 		if (GetCurrentFocus() && GetCurrentFocus()->cursor)
 		{
