@@ -891,6 +891,7 @@ struct global_focus_t : public focus_t
 	// Cleanup for the previous pre-emptive upscale, kept a frame behind.
 	std::optional<uint64_t> oLastPreemptiveUpscaleSeqNo;
 	std::vector<TempUpscaleImage_t> UpscaleImages;
+	uint32_t uNextUpscaleImage = 0;
 
 	std::array< gamescope::Rc<commit_t>, HELD_COMMIT_COUNT > HeldCommits;
 	std::array< BaseLayerInfo_t, HELD_COMMIT_COUNT > CachedPlanes = {};
@@ -4348,6 +4349,9 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	pFocus->eUpscaleScaler = previousLocalFocus.eUpscaleScaler;
 	pFocus->oLastPreemptiveUpscaleSeqNo = previousLocalFocus.oLastPreemptiveUpscaleSeqNo;
 	pFocus->UpscaleImages = std::move( previousLocalFocus.UpscaleImages );
+	// Carry the cursor with the pool, a reroll would otherwise send every
+	// connector back to the lowest slots.
+	pFocus->uNextUpscaleImage = previousLocalFocus.uNextUpscaleImage;
 	gameFocused = false;
 
 	focus_log.debugf( "Rerolling global focus..." );
@@ -7447,6 +7451,7 @@ void force_repaint( void )
 void ClearUpscaleImages( global_focus_t *pFocus )
 {
 	pFocus->UpscaleImages.clear();
+	pFocus->uNextUpscaleImage = 0;
 }
 
 static TempUpscaleImage_t *GetTempUpscaleImage( global_focus_t *pFocus, uint32_t uWidth, uint32_t uHeight, uint32_t uDrmFormat )
@@ -7460,13 +7465,23 @@ static TempUpscaleImage_t *GetTempUpscaleImage( global_focus_t *pFocus, uint32_t
 			 pFocus->UpscaleImages[0].pTexture->drmFormat() != uDrmFormat )
 		{
 			pFocus->UpscaleImages.clear();
+			pFocus->uNextUpscaleImage = 0;
 		}
 	}
 
-	for ( TempUpscaleImage_t &image : pFocus->UpscaleImages )
+	// Round robin rather than first free, so a slot rests as long as possible
+	// before reuse. SteamVR consumes the handles asynchronously and can sample
+	// one slightly after our bookkeeping retires it, the same reason the
+	// OpenVR composite pool rotates.
+	for ( size_t i = 0; i < pFocus->UpscaleImages.size(); i++ )
 	{
+		size_t uIndex = ( pFocus->uNextUpscaleImage + i ) % pFocus->UpscaleImages.size();
+		TempUpscaleImage_t &image = pFocus->UpscaleImages[ uIndex ];
 		if ( !image.pTexture->IsInUse() )
+		{
+			pFocus->uNextUpscaleImage = ( uIndex + 1 ) % pFocus->UpscaleImages.size();
 			return &image;
+		}
 	}
 
 	if ( pFocus->UpscaleImages.size() > 8 )
