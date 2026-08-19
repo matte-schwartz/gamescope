@@ -2323,7 +2323,13 @@ namespace gamescope
         else
         {
             std::string szSubviewName = sOverlayKey + std::string(".layer") + std::to_string( m_uSortOrder );
-            vr::VROverlay()->CreateSubviewOverlay( pParent->GetOverlay(), szSubviewName.c_str(), "Gamescope Layer", &m_hOverlay );
+            vr::EVROverlayError err = vr::VROverlay()->CreateSubviewOverlay( pParent->GetOverlay(), szSubviewName.c_str(), "Gamescope Layer", &m_hOverlay );
+            if ( err != vr::VROverlayError_None )
+            {
+                // Log only. A dead subview is what we had before this check, and
+                // failing the whole connector here would be a bigger change.
+                openvr_log.errorf( "Failed to create subview overlay %s: %s", szSubviewName.c_str(), vr::VROverlay()->GetOverlayErrorNameFromEnum( err ) );
+            }
         }
 
         vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_EnableClickStabilization, m_pBackend->ShouldEnableClickStabilization() );
