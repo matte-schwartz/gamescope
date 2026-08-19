@@ -1,10 +1,12 @@
 #include <sys/ipc.h>
+#include <algorithm>
 #include <unistd.h>
 #include <sys/msg.h>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "steamcompmgr.hpp"
 #include "refresh_rate.h"
@@ -50,6 +52,14 @@ void init_mangoapp(){
 static std::mutex s_FrameTimeMutex;
 static std::unordered_map<uint32_t, uint64_t> s_LastFrameTimes;
 
+// Mirrors a queue message, mtype first, sized past any control message
+// mangoapp defines.
+struct MangoappRawMsg_t
+{
+    long mtype;
+    uint8_t data[1016];
+};
+
 // The queue outlives gamescope and msg types start over every run, so a type
 // left with unread messages feeds them to the next session's instance.
 void mangoapp_drop_stream( uint32_t uMsgType )
@@ -57,9 +67,10 @@ void mangoapp_drop_stream( uint32_t uMsgType )
     if (!inited)
         init_mangoapp();
 
-    uint8_t rawMsg[1024];
-    while (msgrcv(msgid, rawMsg, sizeof(rawMsg) - sizeof(long), uMsgType, IPC_NOWAIT | MSG_NOERROR) >= 0)
-        ;
+    MangoappRawMsg_t rawMsg;
+    for (uint32_t uType : { uMsgType, MangoappControlMsgType(uMsgType) })
+        while (msgrcv(msgid, &rawMsg, sizeof(rawMsg.data), uType, IPC_NOWAIT | MSG_NOERROR) >= 0)
+            ;
 
     std::unique_lock lock( s_FrameTimeMutex );
     s_LastFrameTimes.erase( uMsgType );
@@ -69,6 +80,71 @@ void mangoapp_set_connector_snapshots( std::unordered_map<uint32_t, MangoappSnap
 {
     std::unique_lock lock( s_SnapshotMutex );
     s_ConnectorSnapshots = std::move( snapshots );
+}
+
+// A send that did not fit. These commands toggle rather than set, so an instance
+// that never gets one disagrees with the others from then on. Only ever one
+// fan-out deep, and only the steamcompmgr thread touches it.
+struct MangoappPendingControl_t
+{
+    uint32_t uMsgType;
+    size_t size;
+    MangoappRawMsg_t msg;
+};
+static std::vector<MangoappPendingControl_t> s_PendingControl;
+
+// mangohudctl posts one control message, and System V hands each message to a
+// single reader, so only one instance would ever act on it. Move every message
+// onto each connector's control type instead. Returns how many sends are still
+// waiting for room.
+uint32_t mangoapp_relay_control( const std::vector<uint32_t> &msgTypes )
+{
+    if (msgTypes.empty())
+        return 0;
+
+    if (!inited)
+        init_mangoapp();
+
+    // Finish the last fan-out before taking a new message, so an instance
+    // cannot see two commands out of order.
+    while (!s_PendingControl.empty())
+    {
+        const MangoappPendingControl_t &pending = s_PendingControl.front();
+        bool bConnectorGone = std::find(msgTypes.begin(), msgTypes.end(), pending.uMsgType) == msgTypes.end();
+        if (!bConnectorGone && msgsnd(msgid, &pending.msg, pending.size, IPC_NOWAIT) < 0)
+            return (uint32_t) s_PendingControl.size();
+        s_PendingControl.erase(s_PendingControl.begin());
+    }
+
+    uint32_t uDeferred = 0;
+    MangoappRawMsg_t rawMsg;
+    for (;;)
+    {
+        ssize_t size = msgrcv(msgid, &rawMsg, sizeof(rawMsg.data), k_uMangoappControlMsgType, IPC_NOWAIT | MSG_NOERROR);
+        if (size < 0)
+            break;
+
+        // Truncated, so fanning it out would hand every instance a corrupt message.
+        if (size == ssize_t(sizeof(rawMsg.data)))
+            continue;
+
+        // A control type nobody reads yet holds the message until that instance
+        // starts, so a late mangoapp still gets it.
+        for (uint32_t uMsgType : msgTypes)
+        {
+            rawMsg.mtype = MangoappControlMsgType(uMsgType);
+            // Once one send does not fit, hold the rest rather than deliver them ahead of it.
+            if (uDeferred || msgsnd(msgid, &rawMsg, size, IPC_NOWAIT) < 0)
+            {
+                s_PendingControl.push_back( MangoappPendingControl_t{ uMsgType, size_t(size), rawMsg } );
+                uDeferred++;
+            }
+        }
+
+        if (uDeferred)
+            break;
+    }
+    return uDeferred;
 }
 
 void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uint64_t latency_ns, uint32_t uMsgType ) {

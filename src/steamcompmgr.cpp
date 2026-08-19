@@ -8733,9 +8733,11 @@ static void UpdateMangoappInstances()
 		if ( s_MangoappInstances.contains( iter.first ) )
 			continue;
 
-		uint32_t uMsgType = s_uNextMangoappMsgType++;
+		// The control type is the stream type plus one, so allocate in pairs.
+		uint32_t uMsgType = s_uNextMangoappMsgType;
+		s_uNextMangoappMsgType += 2;
 
-		// A previous run may have left messages on this type, so clear it
+		// A previous run may have left messages on these types, so clear them
 		// before the instance that would read them exists.
 		mangoapp_drop_stream( uMsgType );
 
@@ -8843,6 +8845,44 @@ static void publish_mangoapp_connector_snapshots()
 			mangoapp_update( ulNow - lastBasePlane.second, uint64_t(~0ull), uint64_t(~0ull), uMsgType );
 		lastBasePlane = { iter.second.ulBasePlaneCommitID, ulNow };
 	}
+}
+
+// mangohudctl posts one control message for every instance to act on.
+static void relay_mangoapp_control()
+{
+	if ( !GetBackend()->UsesVirtualConnectors() || s_MangoappInstances.empty() )
+		return;
+
+	// A stock mangoapp reads the control type itself, so leave the queue alone.
+	xwayland_ctx_t *root_ctx = wlserver_get_xwayland_server( 0 )->ctx.get();
+	if ( root_ctx->focus.externalOverlayWindow )
+		return;
+
+	// One tag is enough to know these instances read a control type at all.
+	bool bAnyTagged = false;
+	for ( auto &iter : g_VirtualConnectorFocuses )
+	{
+		if ( iter.second.externalOverlayWindow && iter.second.externalOverlayWindow->uMangoappMsgType )
+		{
+			bAnyTagged = true;
+			break;
+		}
+	}
+	if ( !bAnyTagged )
+		return;
+
+	// Every spawned instance, so one that has not mapped its window yet still
+	// finds the message when it starts reading.
+	std::vector<uint32_t> msgTypes;
+	msgTypes.reserve( s_MangoappInstances.size() );
+	for ( const auto &iter : s_MangoappInstances )
+		msgTypes.push_back( iter.second.uMsgType );
+
+	uint32_t uHeldBack = mangoapp_relay_control( msgTypes );
+	static bool s_bLoggedHeldBack = false;
+	if ( uHeldBack && !s_bLoggedHeldBack )
+		xwm_log.warnf( "Holding back %u mangoapp control message(s), the queue is full", uHeldBack );
+	s_bLoggedHeldBack = uHeldBack != 0;
 }
 
 void
@@ -9691,6 +9731,7 @@ steamcompmgr_main(int argc, char **argv)
 
 		publish_mangoapp_snapshot();
 		publish_mangoapp_connector_snapshots();
+		relay_mangoapp_control();
 
 		if ( bIsVBlankFromTimer )
 		{
