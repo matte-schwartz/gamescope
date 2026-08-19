@@ -116,6 +116,8 @@ struct steamcompmgr_win_t {
 	uint32_t appID = 0;
 	bool isOverlay = false;
 	bool isExternalOverlay = false;
+	// Set by per-connector mangoapp instances.
+	uint32_t uMangoappMsgType = 0;
 
 	bool bIsSteamPid = false;
 	bool bIsSteamWebHelperPid = false;
