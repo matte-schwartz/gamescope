@@ -8823,6 +8823,26 @@ static void publish_mangoapp_connector_snapshots()
 		};
 	}
 	mangoapp_set_connector_snapshots( std::move( snapshots ) );
+
+	// The DRM and swapchain visible-frametime paths never run on these
+	// backends, and mangoapp only repaints on a visible frametime. Gate on
+	// the picked tagged window so an unread stream cannot fill the queue.
+	static std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> s_LastBasePlanes;
+	uint64_t ulNow = get_time_in_nanos();
+	for ( auto &iter : g_VirtualConnectorFocuses )
+	{
+		uint32_t uMsgType = iter.second.externalOverlayWindow ? iter.second.externalOverlayWindow->uMangoappMsgType : 0;
+		if ( !uMsgType )
+			continue;
+
+		auto &lastBasePlane = s_LastBasePlanes[ uMsgType ];
+		if ( lastBasePlane.first == iter.second.ulBasePlaneCommitID )
+			continue;
+
+		if ( lastBasePlane.second && ulNow > lastBasePlane.second )
+			mangoapp_update( ulNow - lastBasePlane.second, uint64_t(~0ull), uint64_t(~0ull), uMsgType );
+		lastBasePlane = { iter.second.ulBasePlaneCommitID, ulNow };
+	}
 }
 
 void
