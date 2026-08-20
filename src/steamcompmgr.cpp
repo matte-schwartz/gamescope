@@ -52,6 +52,7 @@
 #include <queue>
 #include <filesystem>
 #include <variant>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <assert.h>
@@ -96,6 +97,7 @@
 #include "commit.h"
 #include "reshade_effect_manager.hpp"
 #include "BufferMemo.h"
+#include "vrclient_detect.h"
 #include "Utils/Process.h"
 #include "Utils/Algorithm.h"
 
@@ -1057,11 +1059,160 @@ window_is_vr_scene_app( steamcompmgr_win_t *w )
 	return w && w->appID && w->appID == g_unCurrentVRSceneAppId.load( std::memory_order_relaxed );
 }
 
+gamescope::ConVar<bool> cv_limiter_vr_exempt( "limiter_vr_exempt", true, "Exempt VR app windows from the fps limiter during VR sessions." );
+
+// Poller thread <-> steamcompmgr shared state. Leaked so shutdown never
+// races the detached thread.
+struct VRSessionPollState_t
+{
+	std::mutex mutex;
+	bool bEnabled = false;
+	std::vector<pid_t> vecWantPids;
+	bool bSessionActive = false;
+	std::unordered_set<pid_t> setVRClientPids;
+};
+static VRSessionPollState_t *s_pVRSessionPollState = nullptr;
+
+// steamcompmgr-thread mirrors, pure reads are safe under wlserver_lock.
+static bool s_bVRSessionActive = false;
+static std::unordered_set<pid_t> s_setVRClientPids;
+
+// The probes block on /proc, so they live on their own thread. A VR
+// session is "a vrserver process exists". VR_IsHmdPresent is unusable
+// as the signal, it reports true whenever vrserver runs even with no
+// HMD, or pinned by a driver declaring hmd_presence "*.*".
+static void
+vr_session_poll_thread( VRSessionPollState_t *pState )
+{
+	pthread_setname_np( pthread_self(), "gamescope-vrmon" );
+
+	struct VRClientEntry_t
+	{
+		bool bMapped = false;
+		uint64_t ulLastCheckTime = 0;
+	};
+	std::unordered_map<pid_t, VRClientEntry_t> cache;
+	bool bSessionActive = false;
+	uint64_t ulLastSessionCheckTime = 0;
+
+	for ( ;; )
+	{
+		std::this_thread::sleep_for( std::chrono::seconds( 1 ) );
+
+		bool bEnabled;
+		std::vector<pid_t> vecWantPids;
+		{
+			std::scoped_lock lock{ pState->mutex };
+			bEnabled = pState->bEnabled;
+			vecWantPids = pState->vecWantPids;
+		}
+
+		if ( !bEnabled )
+		{
+			bSessionActive = false;
+			cache.clear();
+		}
+		else
+		{
+			uint64_t now = get_time_in_nanos();
+
+			static constexpr uint64_t k_ulVRSessionRecheckInterval = 5'000'000'000ul;
+			if ( !ulLastSessionCheckTime || now - ulLastSessionCheckTime >= k_ulVRSessionRecheckInterval )
+			{
+				ulLastSessionCheckTime = now;
+				bSessionActive = gamescope::Process::IsProcessRunning( "vrserver" );
+			}
+
+			if ( bSessionActive )
+			{
+				// Re-validates in both directions, vrclient can unload.
+				static constexpr uint64_t k_ulVRClientRecheckInterval = 2'000'000'000ul;
+				for ( pid_t pid : vecWantPids )
+				{
+					VRClientEntry_t &entry = cache[ pid ];
+					if ( !entry.ulLastCheckTime || now - entry.ulLastCheckTime >= k_ulVRClientRecheckInterval )
+					{
+						entry.ulLastCheckTime = now;
+						entry.bMapped = gamescope::ProcessHasVRClientMapped( pid );
+					}
+				}
+
+				std::erase_if( cache, [&]( const auto &entry )
+				{
+					return std::find( vecWantPids.begin(), vecWantPids.end(), entry.first ) == vecWantPids.end();
+				});
+			}
+			else
+			{
+				cache.clear();
+			}
+		}
+
+		std::unordered_set<pid_t> setVRClientPids;
+		for ( const auto &entry : cache )
+		{
+			if ( entry.second.bMapped )
+				setVRClientPids.insert( entry.first );
+		}
+
+		std::scoped_lock lock{ pState->mutex };
+		pState->bSessionActive = bSessionActive;
+		pState->setVRClientPids = std::move( setVRClientPids );
+	}
+}
+
+// Hands the poller the pids worth probing and mirrors its results.
+static void
+steamcompmgr_update_vr_session_state()
+{
+	if ( GetBackend()->UsesVirtualConnectors() )
+		return;
+
+	if ( !s_pVRSessionPollState )
+	{
+		s_pVRSessionPollState = new VRSessionPollState_t;
+		std::thread( vr_session_poll_thread, s_pVRSessionPollState ).detach();
+	}
+
+	std::vector<pid_t> vecWantPids;
+	gamescope_xwayland_server_t *server = NULL;
+	for ( size_t i = 0; ( server = wlserver_get_xwayland_server( i ) ); i++ )
+	{
+		for ( steamcompmgr_win_t *w = server->ctx->list; w; w = w->xwayland().next )
+		{
+			// Must track the exclusions in steamcompmgr_window_should_limit_fps.
+			if ( w->pid <= 0 || window_is_steam( w ) || w->isOverlay || w->isExternalOverlay || window_is_vr_scene_app( w ) )
+				continue;
+
+			if ( std::find( vecWantPids.begin(), vecWantPids.end(), w->pid ) == vecWantPids.end() )
+				vecWantPids.push_back( w->pid );
+		}
+	}
+
+	std::scoped_lock lock{ s_pVRSessionPollState->mutex };
+	s_pVRSessionPollState->bEnabled = cv_limiter_vr_exempt;
+	s_pVRSessionPollState->vecWantPids = std::move( vecWantPids );
+	s_bVRSessionActive = s_pVRSessionPollState->bSessionActive;
+	s_setVRClientPids = s_pVRSessionPollState->setVRClientPids;
+}
+
+// Limiting a VR app's flat companion presents throttles its VR render
+// loop. The session check keeps VR-less machines from exempting anything,
+// the per-process check keeps flat games limited while SteamVR merely
+// runs. Residual: a flat game that probed for VR keeps vrclient mapped
+// and is exempted while a session runs.
+static bool
+window_is_vr_app( steamcompmgr_win_t *w )
+{
+	return window_is_vr_scene_app( w ) ||
+		( w && cv_limiter_vr_exempt && s_bVRSessionActive && s_setVRClientPids.count( w->pid ) > 0 );
+}
+
 bool g_bChangeDynamicRefreshBasedOnGameOpenRatherThanActive = false;
 
 bool steamcompmgr_window_should_limit_fps( steamcompmgr_win_t *w )
 {
-	return w && !window_is_steam( w ) && !window_is_vr_scene_app( w ) && !w->isOverlay && !w->isExternalOverlay;
+	return w && !window_is_steam( w ) && !w->isOverlay && !w->isExternalOverlay && !window_is_vr_app( w );
 }
 
 static bool
@@ -1411,6 +1562,9 @@ import_commit (
 	commit->desired_present_time = desired_present_time;
 	if (window_is_vr_scene_app( w )) {
 		commit->async = true;
+		commit->fifo = false;
+	} else if (window_is_vr_app( w )) {
+		// Heuristic match keeps vblank-aligned flips, no async tearing.
 		commit->fifo = false;
 	}
 
@@ -8838,6 +8992,8 @@ steamcompmgr_main(int argc, char **argv)
 		{
 			{
 				uint64_t now = get_time_in_nanos();
+
+				steamcompmgr_update_vr_session_state();
 
 				gamescope_xwayland_server_t *server = NULL;
 				for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)

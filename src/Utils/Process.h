@@ -12,6 +12,8 @@ namespace gamescope::Process
     void SetDeathSignal( int nSignal );
 
     void KillAllChildren( pid_t nParentPid, int nSignal );
+
+    bool IsProcessRunning( const char *pszComm );
     void KillProcess( pid_t nPid, int nSignal );
 
     std::optional<int> WaitForChild( pid_t nPid );
