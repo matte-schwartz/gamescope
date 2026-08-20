@@ -8,7 +8,7 @@ endforeach
 
 gamescope_tests = executable(
 	'gamescope_tests',
-	unittest_src + ['test_convar.cpp', 'test_process.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp'],
+	unittest_src + ['test_convar.cpp', 'test_process.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_vrclient_detect.cpp'],
 	include_directories: [srcdir, sol2_include],
 	dependencies: [catch2_dep, luajit_dep, cap_dep, drm_dep, glm_dep, wlroots_dep],
 	cpp_args: gamescope_cpp_args,
@@ -20,3 +20,4 @@ test('convar', gamescope_tests, args: ['[convar]'])
 test('utils/parsers', gamescope_tests, args: ['[parsers]'])
 test('utils/process', gamescope_tests, args: ['[process]'], depends: [reaper_test_helper])
 test('utils/string', gamescope_tests, args: ['[string]'])
+test('vrclient_detect', gamescope_tests, args: ['[vrclient_detect]'])
