@@ -1138,6 +1138,22 @@ window_is_vr_scene_app( steamcompmgr_win_t *w )
 	return w && w->appID && w->appID == g_unCurrentVRSceneAppId.load( std::memory_order_relaxed );
 }
 
+// Windows the limiter never covers. The streaming client video window
+// carries the remote game, so the cap still applies to it.
+static bool
+window_is_limiter_exempt( steamcompmgr_win_t *w )
+{
+	if ( !w )
+		return true;
+
+	if ( w->isSteamStreamingClientVideo )
+		return false;
+
+	// Under -vrgamepadui the Steam UI panels carry a VR overlay target instead of the Steam appid.
+	return window_is_steam( w ) || w->oulTargetVROverlay.has_value() ||
+		w->isOverlay || w->isExternalOverlay || window_is_vr_scene_app( w );
+}
+
 gamescope::ConVar<bool> cv_limiter_vr_exempt( "limiter_vr_exempt", true, "Exempt VR app windows from the fps limiter during VR sessions." );
 
 // Poller thread <-> steamcompmgr shared state. Leaked so shutdown never
@@ -1268,8 +1284,7 @@ steamcompmgr_update_vr_session_state()
 	{
 		for ( steamcompmgr_win_t *w = server->ctx->list; w; w = w->xwayland().next )
 		{
-			// Must track the base exclusions in steamcompmgr_window_should_limit_fps.
-			if ( w->pid <= 0 || window_is_steam( w ) || w->isOverlay || w->isExternalOverlay || window_is_vr_scene_app( w ) )
+			if ( w->pid <= 0 || window_is_limiter_exempt( w ) )
 				continue;
 
 			if ( std::find( vecWantPids.begin(), vecWantPids.end(), w->pid ) == vecWantPids.end() )
@@ -1300,7 +1315,7 @@ bool g_bChangeDynamicRefreshBasedOnGameOpenRatherThanActive = false;
 
 bool steamcompmgr_window_should_limit_fps( steamcompmgr_win_t *w )
 {
-	return w && !window_is_steam( w ) && !w->isOverlay && !w->isExternalOverlay && !window_is_vr_app( w );
+	return !window_is_limiter_exempt( w ) && !window_is_vr_app( w );
 }
 
 static bool
