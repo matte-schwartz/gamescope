@@ -4278,6 +4278,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 	}
 
 	steamcompmgr_win_t *keyboardFocusWin = inputFocus;
+	steamcompmgr_win_t *mouseBaseWindow = nullptr;
 
 	if ( gamescope::VirtualConnectorIsSingleOutput() )
 	{
@@ -4298,6 +4299,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 			{
 				inputFocus = mouse_focus.overrideWindow ? mouse_focus.overrideWindow : mouse_focus.focusWindow;
 				ctx->focus.overrideWindowMouse = mouse_focus.overrideWindow;
+				mouseBaseWindow = mouse_focus.focusWindow;
 			}
 		}
 
@@ -4406,7 +4408,21 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 	if ( inputFocus == ctx->focus.focusWindow && ctx->focus.overrideWindowMouse )
 		inputFocus = ctx->focus.overrideWindowMouse;
 
-	if ( ctx->list[0].xwayland().id != inputFocus->xwayland().id )
+	// X routes the pointer by stacking, so the mouse pick's base window goes under its override, above the rest.
+	bool bRaisedBase = false;
+	if ( mouseBaseWindow && mouseBaseWindow != inputFocus )
+	{
+		steamcompmgr_win_t *pTop = ctx->list;
+		bool bBaseStacked = pTop == mouseBaseWindow ||
+			( pTop == inputFocus && pTop->xwayland().next == mouseBaseWindow );
+		if ( !bBaseStacked )
+		{
+			mouseBaseWindow->Raise();
+			bRaisedBase = true;
+		}
+	}
+
+	if ( bRaisedBase || ctx->list[0].xwayland().id != inputFocus->xwayland().id )
 		inputFocus->Raise();
 
 	// X confines the pointer to the screen, so a screen-sized focus window only
