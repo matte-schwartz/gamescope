@@ -75,6 +75,7 @@ gamescope::ConVar<float> cv_vr_trackpad_click_max_delta( "vr_trackpad_click_max_
 gamescope::ConVar<bool> cv_vr_debug_force_opaque( "vr_debug_force_opaque", false, "Force textures to be treated as opaque." );
 gamescope::ConVar<bool> cv_vr_nudge_to_visible( "vr_nudge_to_visible", false, "" );
 gamescope::ConVar<bool> cv_vr_nudge_to_visible_per_connector( "vr_nudge_to_visible_per_connector", false, "" );
+gamescope::ConVar<bool> cv_vr_click_focus( "vr_click_focus", true, "Move keyboard focus to the overlay a click lands on, without waiting for SteamVR to grant it." );
 
 // Maximum interval between polling for VR events (normally paced by frame sync)
 gamescope::ConVar<uint32_t> cv_vr_poll_rate( "vr_poll_rate", 50ul, "Max time between input polls. In milliseconds." );
@@ -1358,6 +1359,12 @@ namespace gamescope
                     {
                         SetMouseFocus( hOverlay );
 
+                        // Games sharing an Xwayland share one X focus, so the click has to activate its game.
+                        if ( cv_vr_click_focus && vrEvent.eventType == vr::VREvent_MouseButtonDown )
+                        {
+                            SetKeyboardFocus( hOverlay );
+                        }
+
                         if (!pConnector->m_bUsingVRMouse)
                         {
                             pConnector->m_bUsingVRMouse = true;
@@ -1911,9 +1918,9 @@ namespace gamescope
 
             // SteamVR can fail to grant a launching app overlay input focus,
             // which would otherwise leave the previous connector current. Only
-            // defer to a holder SteamVR's grant actually points at. Every
-            // caller holds m_mutActiveConnectors, which keeps the holder alive
-            // across the plane lookup.
+            // defer to a holder that currently holds the input focus overlay.
+            // Every caller holds m_mutActiveConnectors, which keeps the holder
+            // alive across the plane lookup.
             if ( bVisible )
             {
                 COpenVRConnector *pKeyboardConnector = m_pBackend->m_pKeyboardFocusConnector.load();
