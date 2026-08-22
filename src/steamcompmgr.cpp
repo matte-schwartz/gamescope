@@ -4054,7 +4054,8 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 	gamescope::VirtualConnectorStrategy eStrategy = gamescope::VirtualConnectorStrategies::PerWindow;
 	gamescope::VirtualConnectorKey_t ulKey = 0;
 
-	if ( ctx->xwayland_server->get_index() != 0 )
+	// SteamControlled ignores the connector key, so it can't split a shared Xwayland.
+	if ( ctx->xwayland_server->get_index() != 0 && gamescope::VirtualConnectorIsSingleOutput() )
 	{
 		eStrategy = gamescope::VirtualConnectorStrategies::SteamControlled;
 		ulKey = 0;
