@@ -2493,6 +2493,7 @@ static bool is_fading_out()
 	return fadeOutStartTime || g_bPendingFade;
 }
 
+// The laser reads these, so follow the pointer's connector.
 static void update_touch_scaling( const struct FrameInfo_t *frameInfo )
 {
 	if ( !frameInfo->layers.count() )
@@ -2832,7 +2833,7 @@ paint_all( global_focus_t *pFocus, bool async )
 				if ( !bHasVideoUnderlay )
 					flags |= PaintWindowFlag::BasePlane;
 				paint_window(w, w, &frameInfo, pFocus->cursor, flags);
-				if ( pFocus == GetCurrentFocus() )
+				if ( pFocus == GetCurrentMouseFocus() )
 					update_touch_scaling( &frameInfo );
 				
 				// paint UI unless it's fully hidden, which it communicates to us through opacity=0
@@ -2869,7 +2870,7 @@ paint_all( global_focus_t *pFocus, bool async )
 					frameInfo.useFSRLayer0 = g_upscaleFilter == GamescopeUpscaleFilter::FSR && needsScaling;
 					frameInfo.useNISLayer0 = g_upscaleFilter == GamescopeUpscaleFilter::NIS && needsScaling;
 				}
-				if ( pFocus == GetCurrentFocus() )
+				if ( pFocus == GetCurrentMouseFocus() )
 					update_touch_scaling( &frameInfo );
 			}
 		}
@@ -2949,7 +2950,7 @@ paint_all( global_focus_t *pFocus, bool async )
 			paint_window(externalOverlay, externalOverlay, &frameInfo, pFocus->cursor, PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter |
 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 ) );
 
-			if ( externalOverlay == pFocus->inputFocusWindow && pFocus == GetCurrentFocus() )
+			if ( externalOverlay == pFocus->inputFocusWindow && pFocus == GetCurrentMouseFocus() )
 				update_touch_scaling( &frameInfo );
 		}
 	}
@@ -2961,7 +2962,7 @@ paint_all( global_focus_t *pFocus, bool async )
 			paint_window(overlay, overlay, &frameInfo, pFocus->cursor, PaintWindowFlag::DrawBorders | PaintWindowFlag::NoFilter |
 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 )  );
 
-			if ( overlay == pFocus->inputFocusWindow && pFocus == GetCurrentFocus() )
+			if ( overlay == pFocus->inputFocusWindow && pFocus == GetCurrentMouseFocus() )
 				update_touch_scaling( &frameInfo );
 		}
 		else if ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() )
