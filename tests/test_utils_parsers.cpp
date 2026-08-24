@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <string_view>
 #include <type_traits>
 
 #include "Utils/Parsers.h"
@@ -91,5 +92,12 @@ TEST_CASE("Utils/Parsers", "[parsers]") {
         REQUIRE(Parse<bool>("0.1") == false);
         REQUIRE(Parse<bool>("foo") == false);
         REQUIRE(Parse<bool>("") == false);
+
+        std::string_view trueBar = "true bar";
+        REQUIRE(Parse<bool>(trueBar.substr(0, 4)) == true);
+        REQUIRE(Parse<bool>(trueBar.substr(0, 3)) == false);
+        REQUIRE(Parse<bool>(trueBar) == false);
+        const char unterminated[4] = { 't', 'r', 'u', 'e' };
+        REQUIRE(Parse<bool>(std::string_view(unterminated, 4)) == true);
     }
 }

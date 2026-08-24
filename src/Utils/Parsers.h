@@ -26,7 +26,8 @@ namespace gamescope
         if ( oNumber )
             return !!*oNumber;
 
-        if ( strcasecmp ( chars.data(), "true" ) == 0 )
+        // chars is not null-terminated.
+        if ( chars.size() == 4 && strncasecmp( chars.data(), "true", 4 ) == 0 )
             return true;
         else
             return false;
