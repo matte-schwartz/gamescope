@@ -4733,27 +4733,47 @@ get_win_icon(xwayland_ctx_t* ctx, steamcompmgr_win_t* w)
 	get_prop(ctx, w->xwayland().id, ctx->atoms.netWMIcon, *w->icon.get());
 }
 
+// Toplevels of desktop apps, whose geometry we manage.
+static bool
+win_is_desktop_window(steamcompmgr_win_t *w)
+{
+	if ( !w )
+		return false;
+
+	if ( win_has_game_id( w ) || w->bIsSteamPid || w->bIsSteamWebHelperPid || w->bIsVRWebHelperPid )
+		return false;
+
+	if ( w->type != steamcompmgr_win_type_t::XWAYLAND )
+		return false;
+
+	if ( w->xwayland().a.override_redirect || ( w->oulTargetVROverlay && !cv_vr_show_forwarded_overlays ) )
+		return false;
+
+	if ( win_maybe_a_dropdown( w ) || win_is_useless( w ) )
+		return false;
+
+	return true;
+}
+
+// Desktop toplevels we size to the screen, which can only be reached at the origin.
+static bool
+win_sized_to_screen(steamcompmgr_win_t *w)
+{
+	if ( !win_is_desktop_window( w ) )
+		return false;
+
+	return !w->sizeHintsSpecified || window_is_fullscreen( w ) || w->xwayland().ctx->force_windows_fullscreen;
+}
+
 static void
 handle_desktop_window(steamcompmgr_win_t *w)
 {
-	if ( !w )
-		return;
-
-	if ( win_has_game_id( w ) || w->bIsSteamPid || w->bIsSteamWebHelperPid || w->bIsVRWebHelperPid )
-		return;
-
-	if ( w->type != steamcompmgr_win_type_t::XWAYLAND )
-		return;
-
-	if ( w->xwayland().a.override_redirect || ( w->oulTargetVROverlay && !cv_vr_show_forwarded_overlays ) )
-		return;
-
-	if ( win_maybe_a_dropdown( w ) || win_is_useless( w ) )
+	if ( !win_is_desktop_window( w ) )
 		return;
 
 	xwayland_ctx_t *ctx = w->xwayland().ctx;
 
-	if ( w->sizeHintsSpecified && !(window_is_fullscreen( w ) || ctx->force_windows_fullscreen) )
+	if ( !win_sized_to_screen( w ) )
 	{
 		if ((unsigned)w->GetGeometry().nWidth != w->requestedWidth || (unsigned)w->GetGeometry().nHeight != w->requestedHeight)
 		{
@@ -5311,7 +5331,45 @@ static void configure_request(xwayland_ctx_t *ctx, XConfigureRequestEvent *confi
 		.stack_mode = configureRequest->detail
 	};
 
-	XConfigureWindow( ctx->dpy, configureRequest->window, configureRequest->value_mask, &changes );
+	// Honoring a move here would only take its input off screen. Size hints are not read before map.
+	unsigned long value_mask = configureRequest->value_mask;
+	steamcompmgr_win_t *w = find_win( ctx, configureRequest->window, false );
+	bool bRefuseMove = win_sized_to_screen( w ) && w->xwayland().a.map_state == IsViewable && ( value_mask & ( CWX | CWY ) );
+	if ( bRefuseMove )
+		value_mask &= ~( CWX | CWY );
+
+	XConfigureWindow( ctx->dpy, configureRequest->window, value_mask, &changes );
+
+	// X sends nothing for a change that did not happen, so ICCCM 4.1.5 has us tell the client where it still is.
+	// See http://tronche.com/gui/x/icccm/sec-4.html#s-4.1.5
+	if ( bRefuseMove )
+	{
+		bool bSizeChanges = ( ( value_mask & CWWidth ) && changes.width != w->xwayland().a.width ) ||
+		                    ( ( value_mask & CWHeight ) && changes.height != w->xwayland().a.height ) ||
+		                    ( ( value_mask & CWBorderWidth ) && changes.border_width != w->xwayland().a.border_width );
+		if ( bSizeChanges )
+			return;
+
+		XEvent notify =
+		{
+			.xconfigure =
+			{
+				.type = ConfigureNotify,
+				.send_event = True,
+				.display = ctx->dpy,
+				.event = configureRequest->window,
+				.window = configureRequest->window,
+				.x = w->xwayland().a.x,
+				.y = w->xwayland().a.y,
+				.width = w->xwayland().a.width,
+				.height = w->xwayland().a.height,
+				.border_width = w->xwayland().a.border_width,
+				.above = None,
+				.override_redirect = False,
+			},
+		};
+		XSendEvent( ctx->dpy, configureRequest->window, False, StructureNotifyMask, &notify );
+	}
 }
 
 static void circulate_request( xwayland_ctx_t *ctx, XCirculateRequestEvent *circulateRequest )
