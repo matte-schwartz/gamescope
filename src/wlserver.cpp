@@ -3124,35 +3124,33 @@ void wlserver_touchup( int touch_id, uint32_t time )
 {
 	assert( wlserver_is_lock_held() );
 
-	if ( wlserver.mouse_focus_surface != NULL )
+	// Release whatever the touch pressed even if its surface is gone, or the seat keeps the button down.
+	bool bReleasedAny = false;
+	for ( int i = 0; i < WLSERVER_BUTTON_COUNT; i++ )
 	{
-		bool bReleasedAny = false;
-		for ( int i = 0; i < WLSERVER_BUTTON_COUNT; i++ )
+		if ( wlserver.button_held[ i ] == true )
 		{
-			if ( wlserver.button_held[ i ] == true )
+			uint32_t button = TouchClickModeToLinuxButton( (gamescope::TouchClickMode) i );
+
+			if ( button != 0 )
 			{
-				uint32_t button = TouchClickModeToLinuxButton( (gamescope::TouchClickMode) i );
-
-				if ( button != 0 )
-				{
-					wlr_seat_pointer_notify_button( wlserver.wlr.seat, time, button, WL_POINTER_BUTTON_STATE_RELEASED );
-					bReleasedAny = true;
-				}
-
-				wlserver.button_held[ i ] = false;
+				wlr_seat_pointer_notify_button( wlserver.wlr.seat, time, button, WL_POINTER_BUTTON_STATE_RELEASED );
+				bReleasedAny = true;
 			}
-		}
 
-		if ( bReleasedAny == true )
-		{
-			wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
+			wlserver.button_held[ i ] = false;
 		}
+	}
 
-		if ( wlserver.touch_down_ids.count( touch_id ) > 0 )
-		{
-			wlr_seat_touch_notify_up( wlserver.wlr.seat, time, touch_id );
-			wlserver.touch_down_ids.erase( touch_id );
-		}
+	if ( bReleasedAny == true )
+	{
+		wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
+	}
+
+	if ( wlserver.touch_down_ids.count( touch_id ) > 0 )
+	{
+		wlr_seat_touch_notify_up( wlserver.wlr.seat, time, touch_id );
+		wlserver.touch_down_ids.erase( touch_id );
 	}
 
 	bump_input_counter();
