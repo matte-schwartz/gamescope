@@ -59,7 +59,7 @@ bool wlserver_is_lock_held(void);
 class gamescope_xwayland_server_t
 {
 public:
-	gamescope_xwayland_server_t(wl_display *display, int nIndex);
+	gamescope_xwayland_server_t(wl_display *display, uint32_t unId);
 	~gamescope_xwayland_server_t();
 
 	void on_xwayland_ready(void *data);
@@ -90,7 +90,7 @@ public:
 
 	void update_output_info();
 
-	int get_index() const { return m_nIndex; }
+	uint32_t get_id() const { return m_unId; }
 
 private:
 	struct wlr_xwayland_server *xwayland_server = NULL;
@@ -104,7 +104,7 @@ private:
 	bool xwayland_ready = false;
 	_XDisplay *dpy = NULL;
 
-	int m_nIndex = 0;
+	uint32_t m_unId = 0;
 
 	std::mutex wayland_commit_lock;
 	std::vector<ResListEntry_t> wayland_commit_queue;
@@ -279,12 +279,14 @@ struct wlserver_output_info {
 void wlserver_set_output_info( const wlserver_output_info *info );
 
 gamescope_xwayland_server_t *wlserver_get_xwayland_server( size_t index );
+// Ids stay valid across destroys, positions in the server list do not.
+gamescope_xwayland_server_t *wlserver_get_xwayland_server_by_id( uint32_t unId );
 const char *wlserver_get_wl_display_name( void );
 
 void wlserver_x11_surface_info_init( struct wlserver_x11_surface_info *surf, gamescope_xwayland_server_t *server, uint32_t x11_id );
 void wlserver_x11_surface_info_finish( struct wlserver_x11_surface_info *surf );
 
-void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int refresh );
+void wlserver_set_xwayland_server_mode( uint32_t unId, int w, int h, int refresh );
 
 extern std::atomic<bool> g_bPendingTouchMovement;
 

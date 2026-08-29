@@ -82,6 +82,8 @@
 
 static LogScope wl_log("wlserver");
 
+static uint32_t s_unNextXWaylandServerId = 0;
+
 using namespace std::literals;
 
 extern gamescope::ConVar<bool> cv_drm_debug_disable_explicit_sync;
@@ -945,7 +947,7 @@ static void gamescope_swapchain_override_window_content( struct wl_client *clien
 {
 	wlserver_wl_surface_info *wl_surface_info = (wlserver_wl_surface_info *)wl_resource_get_user_data( resource );
 
-	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server( server_id );
+	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id( server_id );
 	assert( server );
 	server->handle_override_window_content(client, resource, wl_surface_info->wlr, x11_window);
 }
@@ -1820,9 +1822,9 @@ void wlsession_close_kms()
 
 #endif
 
-gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display, int nIndex)
+gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display, uint32_t unId)
 {
-	m_nIndex = nIndex;
+	m_unId = unId;
 
 	struct wlr_xwayland_server_options xwayland_options = {
 		.lazy = false,
@@ -1833,7 +1835,7 @@ gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display, in
 	xwayland_server = wlr_xwayland_server_create(display, &xwayland_options);
 	if (!xwayland_server)
 	{
-		wl_log.errorf("Failed to start Xwayland server %d", nIndex);
+		wl_log.errorf("Failed to start Xwayland server %u", unId);
 		return;
 	}
 	wl_signal_add(&xwayland_server->events.ready, &xwayland_ready_listener);
@@ -1853,7 +1855,7 @@ gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display, in
 
 	int width = g_nNestedWidth;
 	int height = g_nNestedHeight;
-	if ( g_nXWaylandCount > 1 && nIndex == 0 )
+	if ( g_nXWaylandCount > 1 && unId == 0 )
 	{
 		width = g_nOutputWidth;
 		height = g_nOutputHeight;
@@ -2227,7 +2229,7 @@ bool wlserver_init( void ) {
 
 	for (int i = 0; i < g_nXWaylandCount; i++)
 	{
-		auto server = std::make_unique<gamescope_xwayland_server_t>(wlserver.display, i);
+		auto server = std::make_unique<gamescope_xwayland_server_t>(wlserver.display, s_unNextXWaylandServerId++);
 		wlserver.wlr.xwayland_servers.emplace_back(std::move(server));
 	}
 
@@ -3173,6 +3175,16 @@ gamescope_xwayland_server_t *wlserver_get_xwayland_server( size_t index )
 	return wlserver.wlr.xwayland_servers[index].get();
 }
 
+gamescope_xwayland_server_t *wlserver_get_xwayland_server_by_id( uint32_t unId )
+{
+	for ( auto &server : wlserver.wlr.xwayland_servers )
+	{
+		if ( server->get_id() == unId )
+			return server.get();
+	}
+	return NULL;
+}
+
 const char *wlserver_get_wl_display_name( void )
 {
 	return wlserver.wl_display_name;
@@ -3344,11 +3356,11 @@ void wlserver_x11_surface_info_finish( struct wlserver_x11_surface_info *surf )
 	wl_list_remove( &surf->pending_link );
 }
 
-void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int nRefreshmHz )
+void wlserver_set_xwayland_server_mode( uint32_t unId, int w, int h, int nRefreshmHz )
 {
 	assert( wlserver_is_lock_held() );
 
-	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server( idx );
+	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id( unId );
 	if ( !server )
 		return;
 
@@ -3361,7 +3373,7 @@ void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int nRefreshmH
 		abort();
 	}
 
-	wl_log.infof("Updating mode for xwayland server #%zu: %dx%d@%d", idx, w, h, gamescope::ConvertmHzToHz( nRefreshmHz ) );
+	wl_log.infof("Updating mode for xwayland server #%u: %dx%d@%d", unId, w, h, gamescope::ConvertmHzToHz( nRefreshmHz ) );
 }
 
 // Definitely not very efficient if we end up with
@@ -3399,7 +3411,7 @@ uint32_t wlserver_make_new_xwayland_server()
 {
 	assert( wlserver_is_lock_held() );
 
-	auto& server = wlserver.wlr.xwayland_servers.emplace_back(std::make_unique<gamescope_xwayland_server_t>(wlserver.display, (int)wlserver.wlr.xwayland_servers.size()));
+	auto& server = wlserver.wlr.xwayland_servers.emplace_back(std::make_unique<gamescope_xwayland_server_t>(wlserver.display, s_unNextXWaylandServerId++));
 
 	while (!server->is_xwayland_ready()) {
 		wl_display_flush_clients(wlserver.display);
@@ -3409,7 +3421,7 @@ uint32_t wlserver_make_new_xwayland_server()
 		}
 	}
 
-	return uint32_t(wlserver.wlr.xwayland_servers.size() - 1);
+	return server->get_id();
 }
 
 void wlserver_destroy_xwayland_server(gamescope_xwayland_server_t *server)

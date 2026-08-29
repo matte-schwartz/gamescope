@@ -4234,7 +4234,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 	gamescope::VirtualConnectorKey_t ulKey = 0;
 
 	// SteamControlled ignores the connector key, so it can't split a shared Xwayland.
-	if ( ctx->xwayland_server->get_index() != 0 && gamescope::VirtualConnectorIsSingleOutput() )
+	if ( ctx->xwayland_server->get_id() != 0 && gamescope::VirtualConnectorIsSingleOutput() )
 	{
 		eStrategy = gamescope::VirtualConnectorStrategies::SteamControlled;
 		ulKey = 0;
@@ -4896,7 +4896,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 						if ( !ctx->obTouchPointerEmulation || *ctx->obTouchPointerEmulation != bTouchPointerEmulation )
 						{
-							xwm_log.infof( "Changing touch pointer emulation for display %u to %s\n", ctx->xwayland_server->get_index(), bTouchPointerEmulation ? "true" : "false" );
+							xwm_log.infof( "Changing touch pointer emulation for display %u to %s\n", ctx->xwayland_server->get_id(), bTouchPointerEmulation ? "true" : "false" );
 
 							uint32_t uValue = bTouchPointerEmulation ? 1 : 0;
 							XChangeProperty( ctx->dpy, ctx->root, ctx->atoms.steamosTouchPointerEmulation, XA_CARDINAL, 32, PropModeReplace,
@@ -6703,7 +6703,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		bool hasModeCtrl = get_prop( ctx, ctx->root, ctx->atoms.gamescopeXWaylandModeControl, xwayland_mode_ctl );
 		if ( hasModeCtrl && xwayland_mode_ctl.size() == 4 )
 		{
-			size_t server_idx = size_t{ xwayland_mode_ctl[ 0 ] };
+			uint32_t server_id = xwayland_mode_ctl[ 0 ];
 			int width = xwayland_mode_ctl[ 1 ];
 			int height = xwayland_mode_ctl[ 2 ];
 			bool allowSuperRes = !!xwayland_mode_ctl[ 3 ];
@@ -6714,13 +6714,13 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 				height = std::min<int>(height, currentOutputHeight);
 			}
 
-			gamescope_xwayland_server_t *server = wlserver_get_xwayland_server( server_idx );
+			gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id( server_id );
 			if ( server )
 			{
 				bool root_size_identical = server->ctx->root_width == width && server->ctx->root_height == height;
 
 				wlserver_lock();
-				wlserver_set_xwayland_server_mode( server_idx, width, height, g_nOutputRefresh );
+				wlserver_set_xwayland_server_mode( server_id, width, height, g_nOutputRefresh );
 				wlserver_unlock();
 
 				if ( root_size_identical )
@@ -7053,8 +7053,8 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 			wlserver_lock();
 			uint32_t server_id = (uint32_t)wlserver_make_new_xwayland_server();
 			assert(server_id != ~0u);
-			gamescope_xwayland_server_t *server = wlserver_get_xwayland_server(server_id);
-			init_xwayland_ctx(server_id, server);
+			gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id(server_id);
+			init_xwayland_ctx(server);
 			char propertyString[256];
 			snprintf(propertyString, sizeof(propertyString), "%u %u %s", identifier, server_id, server->get_nested_display_name());
 			XTextProperty text_property =
@@ -7073,7 +7073,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	{
 		uint32_t server_id = get_prop(ctx, ctx->root, ctx->atoms.gamescopeDestroyXWaylandServer, 0);
 
-		gamescope_xwayland_server_t *server = wlserver_get_xwayland_server(server_id);
+		gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id(server_id);
 		if (server)
 		{
 			for ( auto &iter : g_VirtualConnectorFocuses )
@@ -8209,7 +8209,7 @@ xwayland_ctx_t g_ctx;
 
 static bool setup_error_handlers = false;
 
-void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_server)
+void init_xwayland_ctx(gamescope_xwayland_server_t *xwayland_server)
 {
 	assert(!xwayland_server->ctx);
 	xwayland_server->ctx = std::make_unique<xwayland_ctx_t>();
@@ -8469,6 +8469,7 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
 	ctx->allDamage = None;
 	ctx->clipChanged = true;
 
+	uint32_t serverId = xwayland_server->get_id();
 	XChangeProperty(ctx->dpy, ctx->root, ctx->atoms.gamescopeXwaylandServerId, XA_CARDINAL, 32, PropModeReplace,
 		(unsigned char *)&serverId, 1 );
 
@@ -8954,7 +8955,7 @@ steamcompmgr_main(int argc, char **argv)
 	{
 		gamescope_xwayland_server_t *server = NULL;
 		for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)
-			init_xwayland_ctx(i, server);
+			init_xwayland_ctx(server);
 	}
 
 	gamescope_xwayland_server_t *root_server = wlserver_get_xwayland_server(0);
