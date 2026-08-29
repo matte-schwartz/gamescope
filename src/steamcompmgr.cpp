@@ -7052,8 +7052,10 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		{
 			wlserver_lock();
 			uint32_t server_id = (uint32_t)wlserver_make_new_xwayland_server();
+			wlserver_unlock();
 			assert(server_id != ~0u);
 			gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id(server_id);
+			// add_win takes the wlserver lock itself, so the ctx is set up unlocked.
 			init_xwayland_ctx(server);
 			char propertyString[256];
 			snprintf(propertyString, sizeof(propertyString), "%u %u %s", identifier, server_id, server->get_nested_display_name());
@@ -7066,7 +7068,6 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 			};
 			g_SteamCompMgrWaiter.AddWaitable( server->ctx.get() );
 			XSetTextProperty( ctx->dpy, ctx->root, &text_property, ctx->atoms.gamescopeCreateXWaylandServerFeedback );
-			wlserver_unlock();
 		}
 	}
 	if (ev->atom == ctx->atoms.gamescopeDestroyXWaylandServer)
