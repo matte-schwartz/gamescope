@@ -293,7 +293,8 @@ extern std::atomic<bool> g_bPendingTouchMovement;
 void wlserver_open_steam_menu( bool qam );
 
 uint32_t wlserver_make_new_xwayland_server();
-void wlserver_destroy_xwayland_server(gamescope_xwayland_server_t *server);
+// The caller owns the result and picks when it dies.
+std::unique_ptr<gamescope_xwayland_server_t> wlserver_release_xwayland_server(gamescope_xwayland_server_t *server);
 
 void wlserver_presentation_feedback_presented( struct wlr_surface *surface, std::vector<struct wl_resource*>& presentation_feedbacks, uint64_t last_refresh_nsec, uint64_t refresh_cycle );
 void wlserver_presentation_feedback_discard( struct wlr_surface *surface, std::vector<struct wl_resource*>& presentation_feedbacks );

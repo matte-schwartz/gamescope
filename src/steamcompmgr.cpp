@@ -6355,6 +6355,9 @@ static inline float santitize_float( float f )
 #endif
 }
 
+// Destroyed servers, freed once the dispatch that killed them is over.
+static std::vector<std::unique_ptr<gamescope_xwayland_server_t>> s_DeadXWaylandServers;
+
 static void
 handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 {
@@ -7149,9 +7152,14 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 				s_PipewireFocus.overrideUnderlayWindow = nullptr;
 #endif
 
+			// Free the windows while the X connection is still up.
+			while ( server->ctx->list )
+				finish_destroy_win( server->ctx.get(), server->ctx->list->xwayland().id, true );
+
+			// The ctx must outlive this dispatch and the epoll batch that carried it.
 			wlserver_lock();
 			g_SteamCompMgrWaiter.RemoveWaitable( server->ctx.get() );
-			wlserver_destroy_xwayland_server(server);
+			s_DeadXWaylandServers.push_back( wlserver_release_xwayland_server( server ) );
 			wlserver_unlock();
 
 			MakeFocusDirty();
@@ -9058,6 +9066,13 @@ steamcompmgr_main(int argc, char **argv)
 		}
 
 		g_SteamCompMgrWaiter.PollEvents();
+
+		if ( !s_DeadXWaylandServers.empty() )
+		{
+			wlserver_lock();
+			s_DeadXWaylandServers.clear();
+			wlserver_unlock();
+		}
 
 		bool vblank = false;
 		if ( std::optional<gamescope::VBlankTime> pendingVBlank = GetVBlankTimer().ProcessVBlank() )

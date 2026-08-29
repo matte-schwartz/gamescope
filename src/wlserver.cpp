@@ -948,7 +948,9 @@ static void gamescope_swapchain_override_window_content( struct wl_client *clien
 	wlserver_wl_surface_info *wl_surface_info = (wlserver_wl_surface_info *)wl_resource_get_user_data( resource );
 
 	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id( server_id );
-	assert( server );
+	// The client can outlive its Xwayland by a few dispatches.
+	if ( !server )
+		return;
 	server->handle_override_window_content(client, resource, wl_surface_info->wlr, x11_window);
 }
 
@@ -1888,6 +1890,11 @@ gamescope_xwayland_server_t::~gamescope_xwayland_server_t()
 		return;
 
 	wl_list_remove(&xwayland_ready_listener.link);
+
+	// Close our connection before the server goes, a dead one is an X I/O error.
+	if ( dpy )
+		XCloseDisplay( dpy );
+	dpy = nullptr;
 
 	wlr_xwayland_server_destroy(xwayland_server);
 	xwayland_server = nullptr;
@@ -3424,9 +3431,18 @@ uint32_t wlserver_make_new_xwayland_server()
 	return server->get_id();
 }
 
-void wlserver_destroy_xwayland_server(gamescope_xwayland_server_t *server)
+std::unique_ptr<gamescope_xwayland_server_t> wlserver_release_xwayland_server(gamescope_xwayland_server_t *server)
 {
 	assert( wlserver_is_lock_held() );
 
-	std::erase_if(wlserver.wlr.xwayland_servers, [=](const auto& other) { return other.get() == server; });
+	auto &servers = wlserver.wlr.xwayland_servers;
+	for ( auto it = servers.begin(); it != servers.end(); ++it )
+	{
+		if ( it->get() != server )
+			continue;
+		std::unique_ptr<gamescope_xwayland_server_t> released = std::move( *it );
+		servers.erase( it );
+		return released;
+	}
+	return nullptr;
 }
