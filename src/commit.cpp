@@ -118,14 +118,14 @@ bool commit_t::CloseFenceInternal()
     return true;
 }
 
-void commit_t::SetFence( int nFence, bool bMangoNudge, CommitDoneList_t *pDoneCommits )
+void commit_t::SetFence( int nFence, bool bMangoNudge, std::shared_ptr<CommitDoneList_t> pDoneCommits )
 {
     std::unique_lock lock( m_WaitableCommitStateMutex );
     CloseFenceInternal();
 
     m_nCommitFence = nFence;
     m_bMangoNudge = bMangoNudge;
-    m_pDoneCommits = pDoneCommits;
+    m_pDoneCommits = std::move( pDoneCommits );
 }
 
 void calc_scale_factor(float &out_scale_x, float &out_scale_y, float sourceWidth, float sourceHeight);
