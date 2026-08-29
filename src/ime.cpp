@@ -524,6 +524,10 @@ static const struct gamescope_input_method_interface ime_impl = {
 
 void destroy_ime(struct wlserver_input_method *ime)
 {
+	// Removing the release timer would strand the held key, so let it go now.
+	release_key_if_needed(ime);
+	wl_event_source_remove(ime->ime_reset_ime_keyboard_event_source);
+	wl_event_source_remove(ime->ime_release_ime_keypress_event_source);
 	wlr_keyboard_finish(&ime->keyboard);
 }
 
