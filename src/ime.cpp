@@ -529,6 +529,7 @@ void destroy_ime(struct wlserver_input_method *ime)
 	wl_event_source_remove(ime->ime_reset_ime_keyboard_event_source);
 	wl_event_source_remove(ime->ime_release_ime_keypress_event_source);
 	wlr_keyboard_finish(&ime->keyboard);
+	free(ime->pending.string);
 }
 
 static void ime_handle_resource_destroy(struct wl_resource *ime_resource)
