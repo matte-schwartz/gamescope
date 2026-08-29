@@ -1831,6 +1831,11 @@ gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display, in
 		.force_xrandr_emulation = true,
 	};
 	xwayland_server = wlr_xwayland_server_create(display, &xwayland_options);
+	if (!xwayland_server)
+	{
+		wl_log.errorf("Failed to start Xwayland server %d", nIndex);
+		return;
+	}
 	wl_signal_add(&xwayland_server->events.ready, &xwayland_ready_listener);
 
 	output = wlr_headless_add_output(wlserver.wlr.headless_backend, 1280, 720);
@@ -1876,6 +1881,9 @@ gamescope_xwayland_server_t::~gamescope_xwayland_server_t()
 		free( co.second );
 	}
 	content_overrides.clear();
+
+	if (!xwayland_server)
+		return;
 
 	wl_list_remove(&xwayland_ready_listener.link);
 
