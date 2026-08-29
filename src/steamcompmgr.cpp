@@ -6355,8 +6355,50 @@ static inline float santitize_float( float f )
 #endif
 }
 
+struct PendingXWaylandServer_t
+{
+	uint32_t unIdentifier;
+	uint32_t unServerId;
+};
+// Servers Steam asked for that have not finished starting yet.
+static std::vector<PendingXWaylandServer_t> s_PendingXWaylandServers;
 // Destroyed servers, freed once the dispatch that killed them is over.
 static std::vector<std::unique_ptr<gamescope_xwayland_server_t>> s_DeadXWaylandServers;
+
+static void set_create_xwayland_server_feedback( xwayland_ctx_t *root_ctx, uint32_t unIdentifier, uint32_t unServerId, const char *pszDisplay )
+{
+	char propertyString[256];
+	snprintf( propertyString, sizeof(propertyString), "%u %u %s", unIdentifier, unServerId, pszDisplay );
+	XTextProperty text_property =
+	{
+		.value = (unsigned char *)propertyString,
+		.encoding = root_ctx->atoms.utf8StringAtom,
+		.format = 8,
+		.nitems = strlen(propertyString),
+	};
+	XSetTextProperty( root_ctx->dpy, root_ctx->root, &text_property, root_ctx->atoms.gamescopeCreateXWaylandServerFeedback );
+	XFlush( root_ctx->dpy );
+}
+
+static void finish_pending_xwayland_servers( xwayland_ctx_t *root_ctx )
+{
+	for ( auto it = s_PendingXWaylandServers.begin(); it != s_PendingXWaylandServers.end(); )
+	{
+		wlserver_lock();
+		gamescope_xwayland_server_t *server = wlserver_adopt_xwayland_server( it->unServerId );
+		wlserver_unlock();
+		if ( !server )
+		{
+			++it;
+			continue;
+		}
+		// add_win takes the wlserver lock itself, so the ctx is set up unlocked.
+		init_xwayland_ctx( server );
+		g_SteamCompMgrWaiter.AddWaitable( server->ctx.get() );
+		set_create_xwayland_server_feedback( root_ctx, it->unIdentifier, it->unServerId, server->get_nested_display_name() );
+		it = s_PendingXWaylandServers.erase( it );
+	}
+}
 
 static void
 handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
@@ -7054,23 +7096,12 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		if (identifier)
 		{
 			wlserver_lock();
-			uint32_t server_id = (uint32_t)wlserver_make_new_xwayland_server();
+			uint32_t server_id = wlserver_make_new_xwayland_server();
 			wlserver_unlock();
-			assert(server_id != ~0u);
-			gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id(server_id);
-			// add_win takes the wlserver lock itself, so the ctx is set up unlocked.
-			init_xwayland_ctx(server);
-			char propertyString[256];
-			snprintf(propertyString, sizeof(propertyString), "%u %u %s", identifier, server_id, server->get_nested_display_name());
-			XTextProperty text_property =
-			{
-				.value = (unsigned char *)propertyString,
-				.encoding = ctx->atoms.utf8StringAtom,
-				.format = 8,
-				.nitems = strlen(propertyString),
-			};
-			g_SteamCompMgrWaiter.AddWaitable( server->ctx.get() );
-			XSetTextProperty( ctx->dpy, ctx->root, &text_property, ctx->atoms.gamescopeCreateXWaylandServerFeedback );
+			if (server_id == ~0u)
+				set_create_xwayland_server_feedback( wlserver_get_xwayland_server( 0 )->ctx.get(), identifier, server_id, "" );
+			else
+				s_PendingXWaylandServers.push_back( PendingXWaylandServer_t{ identifier, server_id } );
 		}
 	}
 	if (ev->atom == ctx->atoms.gamescopeDestroyXWaylandServer)
@@ -9073,6 +9104,9 @@ steamcompmgr_main(int argc, char **argv)
 			s_DeadXWaylandServers.clear();
 			wlserver_unlock();
 		}
+
+		if ( !s_PendingXWaylandServers.empty() )
+			finish_pending_xwayland_servers( root_ctx );
 
 		bool vblank = false;
 		if ( std::optional<gamescope::VBlankTime> pendingVBlank = GetVBlankTimer().ProcessVBlank() )

@@ -66,6 +66,7 @@ public:
 	static void xwayland_ready_callback(struct wl_listener *listener, void *data);
 
 	bool is_xwayland_ready() const;
+	bool is_xwayland_spawned() const { return xwayland_server != nullptr; }
 	const char *get_nested_display_name() const;
 
 	void set_wl_id( struct wlserver_x11_surface_info *surf, uint32_t id );
@@ -101,7 +102,8 @@ private:
 
 	std::unordered_map<uint32_t, wlserver_content_override *> content_overrides;
 
-	bool xwayland_ready = false;
+	// Written on the wlserver thread after dpy, read by steamcompmgr under wlserver_lock.
+	std::atomic<bool> xwayland_ready = false;
 	_XDisplay *dpy = NULL;
 
 	uint32_t m_unId = 0;
@@ -132,6 +134,8 @@ struct wlserver_t {
 		struct wl_listener device_change_listener = {};
 
 		std::vector<std::unique_ptr<gamescope_xwayland_server_t>> xwayland_servers;
+		// Spawned on request, moved to xwayland_servers by steamcompmgr once ready.
+		std::vector<std::unique_ptr<gamescope_xwayland_server_t>> pending_xwayland_servers;
 	} wlr;
 	
 	struct wlr_surface *mouse_focus_surface;
@@ -292,7 +296,10 @@ extern std::atomic<bool> g_bPendingTouchMovement;
 
 void wlserver_open_steam_menu( bool qam );
 
+// Spawns the server and returns its id, ~0u on failure. Readiness comes later.
 uint32_t wlserver_make_new_xwayland_server();
+// Moves a ready pending server into the server list, nullptr while it is still starting.
+gamescope_xwayland_server_t *wlserver_adopt_xwayland_server( uint32_t unId );
 // The caller owns the result and picks when it dies.
 std::unique_ptr<gamescope_xwayland_server_t> wlserver_release_xwayland_server(gamescope_xwayland_server_t *server);
 

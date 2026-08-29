@@ -257,12 +257,12 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 
 void gamescope_xwayland_server_t::on_xwayland_ready(void *data)
 {
-	xwayland_ready = true;
-
 	if (!xwayland_server->options.no_touch_pointer_emulation)
 		wl_log.infof("Xwayland doesn't support -noTouchPointerEmulation, touch events might get duplicated");
 
 	dpy = XOpenDisplay( get_nested_display_name() );
+	xwayland_ready = true;
+	nudge_steamcompmgr();
 }
 
 void gamescope_xwayland_server_t::xwayland_ready_callback(struct wl_listener *listener, void *data)
@@ -2363,6 +2363,7 @@ void wlserver_run(void)
 	// We need to shutdown Xwayland before disconnecting all clients, otherwise
 	// wlroots will restart it automatically.
 	wlserver_lock();
+	wlserver.wlr.pending_xwayland_servers.clear();
 	wlserver.wlr.xwayland_servers.clear();
 
 	wl_list_remove( &new_surface_listener.link );
@@ -3418,17 +3419,30 @@ uint32_t wlserver_make_new_xwayland_server()
 {
 	assert( wlserver_is_lock_held() );
 
-	auto& server = wlserver.wlr.xwayland_servers.emplace_back(std::make_unique<gamescope_xwayland_server_t>(wlserver.display, s_unNextXWaylandServerId++));
-
-	while (!server->is_xwayland_ready()) {
-		wl_display_flush_clients(wlserver.display);
-		if (wl_event_loop_dispatch(wlserver.event_loop, -1) < 0) {
-			wl_log.errorf("wl_event_loop_dispatch failed\n");
-			return ~0u;
-		}
+	auto& server = wlserver.wlr.pending_xwayland_servers.emplace_back(std::make_unique<gamescope_xwayland_server_t>(wlserver.display, s_unNextXWaylandServerId++));
+	if (!server->is_xwayland_spawned())
+	{
+		wlserver.wlr.pending_xwayland_servers.pop_back();
+		return ~0u;
 	}
 
 	return server->get_id();
+}
+
+gamescope_xwayland_server_t *wlserver_adopt_xwayland_server( uint32_t unId )
+{
+	assert( wlserver_is_lock_held() );
+
+	auto &pending = wlserver.wlr.pending_xwayland_servers;
+	for ( auto it = pending.begin(); it != pending.end(); ++it )
+	{
+		if ( (*it)->get_id() != unId || !(*it)->is_xwayland_ready() )
+			continue;
+		gamescope_xwayland_server_t *server = wlserver.wlr.xwayland_servers.emplace_back( std::move( *it ) ).get();
+		pending.erase( it );
+		return server;
+	}
+	return nullptr;
 }
 
 std::unique_ptr<gamescope_xwayland_server_t> wlserver_release_xwayland_server(gamescope_xwayland_server_t *server)
