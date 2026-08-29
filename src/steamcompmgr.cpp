@@ -7074,7 +7074,8 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		uint32_t server_id = get_prop(ctx, ctx->root, ctx->atoms.gamescopeDestroyXWaylandServer, 0);
 
 		gamescope_xwayland_server_t *server = wlserver_get_xwayland_server_by_id(server_id);
-		if (server)
+		// Server 0 is Steam's and lives as long as we do.
+		if (server && server->get_id() != 0)
 		{
 			for ( auto &iter : g_VirtualConnectorFocuses )
 			{
