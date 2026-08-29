@@ -8209,6 +8209,8 @@ xwayland_ctx_t g_ctx;
 
 static bool setup_error_handlers = false;
 
+static bool s_bForceWindowsFullscreen = false;
+
 void init_xwayland_ctx(gamescope_xwayland_server_t *xwayland_server)
 {
 	assert(!xwayland_server->ctx);
@@ -8219,6 +8221,7 @@ void init_xwayland_ctx(gamescope_xwayland_server_t *xwayland_server)
 	int	xres_major, xres_minor;
 
 	ctx->xwayland_server = xwayland_server;
+	ctx->force_windows_fullscreen = s_bForceWindowsFullscreen;
 	ctx->dpy = xwayland_server->get_xdisplay();
 	if (!ctx->dpy)
 	{
@@ -8854,7 +8857,6 @@ steamcompmgr_main(int argc, char **argv)
 
 	int o;
 	int opt_index = -1;
-	bool bForceWindowsFullscreen = false;
 	while ((o = getopt_long(argc, argv, gamescope_optstring, gamescope_options, &opt_index)) != -1)
 	{
 		const char *opt_name;
@@ -8897,7 +8899,7 @@ steamcompmgr_main(int argc, char **argv)
 				} else if (strcmp(opt_name, "fade-out-duration") == 0) {
 					g_FadeOutDuration = atoi(optarg);
 				} else if (strcmp(opt_name, "force-windows-fullscreen") == 0) {
-					bForceWindowsFullscreen = true;
+					s_bForceWindowsFullscreen = true;
 				} else if (strcmp(opt_name, "hdr-enabled") == 0 || strcmp(opt_name, "hdr-enable") == 0) {
 					cv_hdr_enabled = true;
 				} else if (strcmp(opt_name, "hdr-debug-force-support") == 0) {
@@ -8998,8 +9000,6 @@ steamcompmgr_main(int argc, char **argv)
 		{
 			xwayland_ctx_t *pXWaylandCtx = pServer->ctx.get();
 			g_SteamCompMgrWaiter.AddWaitable( pXWaylandCtx );
-
-			pServer->ctx->force_windows_fullscreen = bForceWindowsFullscreen;
 		}
 	}
 
