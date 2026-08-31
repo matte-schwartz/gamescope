@@ -81,6 +81,7 @@
 #include "wlserver.hpp"
 #include "rendervulkan.hpp"
 #include "steamcompmgr.hpp"
+#include "focus_placement.h"
 #include "vblankmanager.hpp"
 #include "log.hpp"
 #include "Utils/Defer.h"
@@ -4559,16 +4560,22 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 	if ( bRaisedBase || ctx->list[0].xwayland().id != inputFocus->xwayland().id )
 		inputFocus->Raise();
 
-	// X confines the pointer to the screen, so a screen-sized focus window only
-	// sees all of it at the origin. Place it there once, a client that moves it
-	// afterwards keeps its position. Oversized windows stay put, clients centre
-	// those to keep the middle reachable.
+	// X confines the pointer to the screen, so clamp the focus window into it
+	// once, per axis. An axis the window does not fit on stays put, clients
+	// center those to keep the middle reachable. Override redirect windows
+	// sit exactly where the client wants them.
 	const Rect rect = w->GetGeometry();
 
-	if ( !w->placed && rect.nWidth == ctx->root_width && rect.nHeight == ctx->root_height )
+	if ( !w->placed && !win_is_override_redirect( w ) )
 	{
-		if ( rect.nX != 0 || rect.nY != 0 )
-			XMoveWindow(ctx->dpy, w->xwayland().id, 0, 0);
+		const focus_placement_t place = focus_placement( rect.nX, rect.nY, rect.nWidth, rect.nHeight, ctx->root_width, ctx->root_height );
+
+		xwm_log.debugf( "placement: win 0x%x at %d,%d %dx%d on %dx%d -> %d,%d",
+				w->id(), rect.nX, rect.nY, rect.nWidth, rect.nHeight,
+				ctx->root_width, ctx->root_height, place.x, place.y );
+
+		if ( place.x != rect.nX || place.y != rect.nY )
+			XMoveWindow(ctx->dpy, w->xwayland().id, place.x, place.y);
 
 		w->placed = true;
 	}
