@@ -137,6 +137,7 @@ extern uint32_t inputCounter;
 extern uint64_t g_lastWinSeq;
 
 void nudge_steamcompmgr( void );
+void MakeFocusDirty();
 void force_repaint( void );
 
 // Per-connector stat snapshot for typed mangoapp streams.

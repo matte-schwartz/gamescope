@@ -365,12 +365,16 @@ void wlserver_open_steam_menu( bool qam )
 	XTestFakeKeyEvent(server->get_xdisplay(), XKeysymToKeycode( server->get_xdisplay(), XK_Control_L ), False, CurrentTime);
 }
 
+static void wlserver_drag_anchor_release();
+static void wlserver_drag_anchor_forget( struct wlr_surface *surface );
+
 static void wlserver_handle_pointer_button(struct wl_listener *listener, void *data)
 {
 	struct wlserver_pointer *pointer = wl_container_of( listener, pointer, button );
 	struct wlr_pointer_button_event *event = (struct wlr_pointer_button_event *) data;
 
 	wlr_seat_pointer_notify_button( wlserver.wlr.seat, event->time_msec, event->button, event->state );
+	wlserver_drag_anchor_release();
 }
 
 static void wlserver_handle_pointer_axis(struct wl_listener *listener, void *data)
@@ -616,6 +620,8 @@ static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
 
 	if ( surf->wlr == wlserver.mouse_focus_surface )
 		wlserver.mouse_focus_surface = nullptr;
+
+	wlserver_drag_anchor_forget( surf->wlr );
 
 	if ( surf->wlr == wlserver.kb_focus_surface )
 		wlserver.kb_focus_surface = nullptr;
@@ -1930,6 +1936,7 @@ static void waylandy_surface_destroy(struct wl_listener *listener, void *data) {
 			wlserver.kb_focus_surface = nullptr;
 		if (wlserver.mouse_focus_surface == info->main_surface)
 			wlserver.mouse_focus_surface = nullptr;
+		wlserver_drag_anchor_forget( info->main_surface );
 		wlserver_surface = get_wl_surface_info(info->main_surface);
 	}
 
@@ -2565,6 +2572,87 @@ void wlserver_oncursorevent()
 	}
 }
 
+bool wlserver_input_held()
+{
+	assert( wlserver_is_lock_held() );
+
+	return wlserver.wlr.seat->pointer_state.button_count > 0 || !wlserver.touch_down_ids.empty();
+}
+
+// Xwayland adds the window origin to the pointer position, so a dragging
+// client reads its own moves back as motion. Subtract them until the press ends.
+void wlserver_drag_anchor_move( struct wlr_surface *surface, int x, int y, int base_x, int base_y )
+{
+	assert( wlserver_is_lock_held() );
+
+	if ( wlserver.drag_anchor.surface != surface )
+	{
+		wl_log.debugf( "drag anchor: now tracking surface %p", (void *)surface );
+		wlserver.drag_anchor = { .surface = surface, .last_x = base_x, .last_y = base_y };
+	}
+
+	// A new drag supersedes any pending settle.
+	wlserver.drag_settle_surface = nullptr;
+
+	wlserver.drag_anchor.dx += x - wlserver.drag_anchor.last_x;
+	wlserver.drag_anchor.dy += y - wlserver.drag_anchor.last_y;
+	wlserver.drag_anchor.last_x = x;
+	wlserver.drag_anchor.last_y = y;
+}
+
+static void wlserver_drag_anchor_apply( double &x, double &y )
+{
+	assert( wlserver_is_lock_held() );
+
+	if ( wlserver.drag_anchor.surface != wlserver.mouse_focus_surface )
+		return;
+
+	x -= wlserver.drag_anchor.dx;
+	y -= wlserver.drag_anchor.dy;
+}
+
+// The dragged surface is gone, drop the anchor and let the focus pass re-place.
+static void wlserver_drag_anchor_forget( struct wlr_surface *surface )
+{
+	assert( wlserver_is_lock_held() );
+
+	if ( wlserver.drag_settle_surface == surface )
+		wlserver.drag_settle_surface = nullptr;
+
+	if ( wlserver.drag_anchor.surface != surface )
+		return;
+
+	wlserver.drag_anchor = {};
+	MakeFocusDirty();
+	nudge_steamcompmgr();
+}
+
+// Covers the moves a client keeps sending before it sees the release.
+static constexpr int k_nDragSettleBudget = 32;
+
+// Nothing is pressed any more, let the focus pass put the window back on the screen.
+static void wlserver_drag_anchor_release()
+{
+	assert( wlserver_is_lock_held() );
+
+	if ( wlserver_input_held() )
+		return;
+
+	if ( !wlserver.drag_anchor.surface )
+	{
+		// A press without a drag ends any pending settle.
+		wlserver.drag_settle_surface = nullptr;
+		return;
+	}
+
+	wl_log.debugf( "drag anchor: released at %f,%f, placing the window again", wlserver.drag_anchor.dx, wlserver.drag_anchor.dy );
+	wlserver.drag_settle_surface = wlserver.drag_anchor.surface;
+	wlserver.drag_settle_budget = k_nDragSettleBudget;
+	wlserver.drag_anchor = {};
+	MakeFocusDirty();
+	nudge_steamcompmgr();
+}
+
 static std::pair<int, int> wlserver_get_cursor_bounds()
 {
 	auto [nWidth, nHeight] = wlserver_get_surface_extent( wlserver.mouse_focus_surface );
@@ -2864,7 +2952,11 @@ void wlserver_mousemotion( double dx, double dy, uint32_t time )
 
 	wlserver_oncursorevent();
 
-	wlr_seat_pointer_notify_motion( wlserver.wlr.seat, time, wlserver.mouse_surface_cursorx, wlserver.mouse_surface_cursory );
+	double sx = wlserver.mouse_surface_cursorx;
+	double sy = wlserver.mouse_surface_cursory;
+	wlserver_drag_anchor_apply( sx, sy );
+
+	wlr_seat_pointer_notify_motion( wlserver.wlr.seat, time, sx, sy );
 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
 }
 
@@ -2883,7 +2975,11 @@ void wlserver_mousewarp( double x, double y, uint32_t time, bool bSynthetic )
 
 	wlserver_oncursorevent();
 
-	wlr_seat_pointer_notify_motion( wlserver.wlr.seat, time, wlserver.mouse_surface_cursorx, wlserver.mouse_surface_cursory );
+	double sx = wlserver.mouse_surface_cursorx;
+	double sy = wlserver.mouse_surface_cursory;
+	wlserver_drag_anchor_apply( sx, sy );
+
+	wlr_seat_pointer_notify_motion( wlserver.wlr.seat, time, sx, sy );
 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
 }
 
@@ -2904,6 +3000,7 @@ void wlserver_mousebutton( int button, bool press, uint32_t time )
 
 	wlr_seat_pointer_notify_button( wlserver.wlr.seat, time, button, press ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED );
 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
+	wlserver_drag_anchor_release();
 }
 
 void wlserver_mousewheel( double flX, double flY, uint32_t time )
@@ -3038,7 +3135,9 @@ void wlserver_touchmotion( double x, double y, int touch_id, uint32_t time, bool
 
 		if ( eMode == gamescope::TouchClickModes::Passthrough )
 		{
-			wlr_seat_touch_notify_motion( wlserver.wlr.seat, time, touch_id, tx, ty );
+			double sx = tx, sy = ty;
+			wlserver_drag_anchor_apply( sx, sy );
+			wlr_seat_touch_notify_motion( wlserver.wlr.seat, time, touch_id, sx, sy );
 
 			if ( bAlwaysWarpCursor )
 				wlserver_mousewarp( tx, ty, time, false );
@@ -3087,8 +3186,9 @@ void wlserver_touchdown( double x, double y, int touch_id, uint32_t time, gamesc
 
 		if ( eMode == gamescope::TouchClickModes::Passthrough )
 		{
-			wlr_seat_touch_notify_down( wlserver.wlr.seat, wlserver.mouse_focus_surface, time, touch_id,
-										tx, ty );
+			double sx = tx, sy = ty;
+			wlserver_drag_anchor_apply( sx, sy );
+			wlr_seat_touch_notify_down( wlserver.wlr.seat, wlserver.mouse_focus_surface, time, touch_id, sx, sy );
 
 			wlserver.touch_down_ids.insert( touch_id );
 		}
@@ -3153,6 +3253,7 @@ void wlserver_touchup( int touch_id, uint32_t time )
 		wlserver.touch_down_ids.erase( touch_id );
 	}
 
+	wlserver_drag_anchor_release();
 	bump_input_counter();
 }
 
