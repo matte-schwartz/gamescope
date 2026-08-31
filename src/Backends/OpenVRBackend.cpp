@@ -1153,6 +1153,24 @@ namespace gamescope
             nudge_steamcompmgr();
         }
 
+        // SteamVR sends VREvent_MouseButtonUp to whichever overlay the laser is
+        // over at release, so a press that started on us can end somewhere else.
+        void ReleaseHeldMouse()
+        {
+            if ( !m_uHeldMouseButton )
+                return;
+
+            uint32_t uButton = m_uHeldMouseButton;
+            m_uHeldMouseButton = 0;
+
+            wlserver_lock();
+            if ( uButton == BTN_LEFT )
+                wlserver_touchup( 0, ++m_uFakeTimestamp );
+            else
+                wlserver_mousebutton( uButton, false, ++m_uFakeTimestamp );
+            wlserver_unlock();
+        }
+
         void ProcessVRInput()
         {
             std::scoped_lock lock{m_mutActiveConnectors};
@@ -1344,6 +1362,9 @@ namespace gamescope
                     {
                         if ( g_FocusedVROverlayMouse == hOverlay )
                         {
+                            // The laser leaving mid press means the release will go to some other overlay.
+                            ReleaseHeldMouse();
+
                             SetMouseFocus( vr::k_ulOverlayHandleInvalid );
                         }
                     }
@@ -1362,7 +1383,13 @@ namespace gamescope
                     break;
                 case vr::VREvent_MouseButtonUp:
                 case vr::VREvent_MouseButtonDown:
-                    if (pConnector)
+                    if (!pConnector)
+                    {
+                        // A release over an overlay that is not ours would be dropped and leave the press held forever.
+                        if (vrEvent.eventType == vr::VREvent_MouseButtonUp)
+                            ReleaseHeldMouse();
+                    }
+                    else
                     {
                         SetMouseFocus( hOverlay );
 
@@ -1430,6 +1457,7 @@ namespace gamescope
                                 wlserver_lock();
                                 if (vrEvent.data.mouse.button == vr::VRMouseButton_Left)
                                 {
+                                    m_uHeldMouseButton = bDown ? BTN_LEFT : 0;
                                     if (bDown)
                                         wlserver_touchdown(flX, flY, 0, ++m_uFakeTimestamp);
                                     else
@@ -1437,10 +1465,12 @@ namespace gamescope
                                 }
                                 else if (vrEvent.data.mouse.button == vr::VRMouseButton_Right)
                                 {
+                                    m_uHeldMouseButton = bDown ? BTN_RIGHT : 0;
                                     wlserver_mousebutton(BTN_RIGHT, bDown, ++m_uFakeTimestamp);
                                 }
                                 else if (vrEvent.data.mouse.button == vr::VRMouseButton_Middle)
                                 {
+                                    m_uHeldMouseButton = bDown ? BTN_MIDDLE : 0;
                                     wlserver_mousebutton(BTN_MIDDLE, bDown, ++m_uFakeTimestamp);
                                 }
                                 wlserver_unlock();
@@ -1536,6 +1566,7 @@ namespace gamescope
         std::atomic<uint32_t> m_uFakeTimestamp = { 0 };
 
         bool m_bMouseDown = false;
+        uint32_t m_uHeldMouseButton = 0;
         uint64_t m_ulMouseDownTime = 0;
         // Fake "trackpad" tracking for the whole overlay panel.
         glm::vec2 m_vScreenTrackpadPos{};
