@@ -4427,21 +4427,26 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 	if ( bRaisedBase || ctx->list[0].xwayland().id != inputFocus->xwayland().id )
 		inputFocus->Raise();
 
-	// X confines the pointer to the screen, so clamp the focus window into it
-	// once, per axis. An axis the window does not fit on stays put, clients
-	// center those to keep the middle reachable. Override redirect windows
-	// sit exactly where the client wants them.
-	const Rect rect = w->GetGeometry();
+	wlserver_lock();
+	bool bDragging = wlserver.drag_anchor.surface && wlserver.drag_anchor.surface == w->main_surface();
+	wlserver_unlock();
 
-	if ( !w->placed && !win_is_override_redirect( w ) )
+	// X confines the pointer to the screen, so clamp the focus window into it
+	// once, per axis, unless a client may still be dragging it. An axis the
+	// window does not fit on stays put, clients center those to keep the
+	// middle reachable. Override redirect windows sit where the client wants
+	// them, and the cached geometry can trail a granted move, so read live.
+	XWindowAttributes placeAttr;
+	if ( !w->placed && !bDragging && !win_is_override_redirect( w ) &&
+	     XGetWindowAttributes( ctx->dpy, w->xwayland().id, &placeAttr ) )
 	{
-		const focus_placement_t place = focus_placement( rect.nX, rect.nY, rect.nWidth, rect.nHeight, ctx->root_width, ctx->root_height );
+		const focus_placement_t place = focus_placement( placeAttr.x, placeAttr.y, placeAttr.width, placeAttr.height, ctx->root_width, ctx->root_height );
 
 		xwm_log.debugf( "placement: win 0x%x at %d,%d %dx%d on %dx%d -> %d,%d",
-				w->id(), rect.nX, rect.nY, rect.nWidth, rect.nHeight,
+				w->id(), placeAttr.x, placeAttr.y, placeAttr.width, placeAttr.height,
 				ctx->root_width, ctx->root_height, place.x, place.y );
 
-		if ( place.x != rect.nX || place.y != rect.nY )
+		if ( place.x != placeAttr.x || place.y != placeAttr.y )
 			XMoveWindow(ctx->dpy, w->xwayland().id, place.x, place.y);
 
 		w->placed = true;
@@ -5702,8 +5707,8 @@ configure_win(xwayland_ctx_t *ctx, XConfigureEvent *ce)
 		return;
 	}
 
-	// Resizing re-arms the placement. Moving does not, so we never fight a
-	// client that drags its window off.
+	// Resizing re-arms the placement. A move does not, configure_request
+	// handles a drag.
 	if ( ce->width != w->xwayland().a.width || ce->height != w->xwayland().a.height )
 		w->placed = false;
 
@@ -5752,6 +5757,40 @@ static void configure_request(xwayland_ctx_t *ctx, XConfigureRequestEvent *confi
 		.sibling = configureRequest->above,
 		.stack_mode = configureRequest->detail
 	};
+
+	// Take a client's own drag out of the pointer position so it does not chase itself.
+	steamcompmgr_win_t *w = find_win( ctx, configureRequest->window, false );
+	if ( w && ( configureRequest->value_mask & ( CWX | CWY ) ) && w->xwayland().a.map_state == IsViewable )
+	{
+		// Any window moved during a press may be the drag target, the anchor only applies under the pointer.
+		wlserver_lock();
+		struct wlr_surface *pSurface = w->main_surface();
+		if ( pSurface && wlserver_input_held() )
+		{
+			// An axis the request leaves out falls back to where the anchor last saw it.
+			bool bTracked = wlserver.drag_anchor.surface == pSurface;
+			int nGrantX = ( configureRequest->value_mask & CWX ) ? changes.x : ( bTracked ? wlserver.drag_anchor.last_x : w->xwayland().a.x );
+			int nGrantY = ( configureRequest->value_mask & CWY ) ? changes.y : ( bTracked ? wlserver.drag_anchor.last_y : w->xwayland().a.y );
+
+			xwm_log.debugf( "drag anchor: win 0x%x moved to %d,%d during a press", w->id(), nGrantX, nGrantY );
+			wlserver_drag_anchor_move( pSurface, nGrantX, nGrantY, w->xwayland().a.x, w->xwayland().a.y );
+			w->placed = false;
+		}
+		else if ( pSurface && pSurface == wlserver.drag_settle_surface )
+		{
+			// A client keeps moving until it sees the release, the budget bounds one that never stops.
+			if ( --wlserver.drag_settle_budget <= 0 )
+				wlserver.drag_settle_surface = nullptr;
+
+			int nGrantX = ( configureRequest->value_mask & CWX ) ? changes.x : w->xwayland().a.x;
+			int nGrantY = ( configureRequest->value_mask & CWY ) ? changes.y : w->xwayland().a.y;
+
+			xwm_log.debugf( "drag anchor: win 0x%x re-asserted %d,%d after its drag", w->id(), nGrantX, nGrantY );
+			w->placed = false;
+			MakeFocusDirty();
+		}
+		wlserver_unlock();
+	}
 
 	XConfigureWindow( ctx->dpy, configureRequest->window, configureRequest->value_mask, &changes );
 }

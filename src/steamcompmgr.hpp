@@ -134,6 +134,7 @@ extern uint32_t inputCounter;
 extern uint64_t g_lastWinSeq;
 
 void nudge_steamcompmgr( void );
+void MakeFocusDirty();
 void force_repaint( void );
 
 extern void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uint64_t latency_ns );
