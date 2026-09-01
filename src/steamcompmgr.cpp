@@ -5300,6 +5300,60 @@ handle_desktop_window(steamcompmgr_win_t *w)
 }
 
 static void
+get_win_wm_class( xwayland_ctx_t *ctx, steamcompmgr_win_t *w )
+{
+	XClassHint hint = {};
+	w->wmClass.clear();
+	if ( !XGetClassHint( ctx->dpy, w->xwayland().id, &hint ) )
+		return;
+
+	if ( hint.res_class )
+		w->wmClass = hint.res_class;
+	XFree( hint.res_name );
+	XFree( hint.res_class );
+}
+
+// STEAM_GAME stamping is racy and can miss a window, but Proton classes every
+// window in a prefix steam_app_<id>, so a stamped sibling settles the appID.
+static bool
+win_has_steam_app_class( steamcompmgr_win_t *w )
+{
+	return w->wmClass.starts_with( "steam_app_" );
+}
+
+static uint32_t
+get_inherited_app_id( xwayland_ctx_t *ctx, steamcompmgr_win_t *w )
+{
+	if ( !win_has_steam_app_class( w ) )
+		return 0;
+
+	for ( steamcompmgr_win_t *other = ctx->list; other; other = other->xwayland().next )
+	{
+		if ( other != w && other->steamAppID != 0 && !other->isExternalOverlay && other->wmClass == w->wmClass )
+			return other->steamAppID;
+	}
+
+	return 0;
+}
+
+static void
+share_app_id_with_siblings( xwayland_ctx_t *ctx, steamcompmgr_win_t *w )
+{
+	if ( !win_has_steam_app_class( w ) )
+		return;
+
+	for ( steamcompmgr_win_t *other = ctx->list; other; other = other->xwayland().next )
+	{
+		if ( other == w || other->steamAppID != 0 || other->appID != 0 || other->isExternalOverlay )
+			continue;
+		if ( other->wmClass != w->wmClass )
+			continue;
+
+		other->appID = w->steamAppID;
+	}
+}
+
+static void
 map_win(xwayland_ctx_t* ctx, Window id, unsigned long sequence)
 {
 	steamcompmgr_win_t		*w = find_win(ctx, id);
@@ -5333,7 +5387,11 @@ map_win(xwayland_ctx_t* ctx, Window id, unsigned long sequence)
 
 	if ( steamMode == true )
 	{
+		get_win_wm_class( ctx, w );
+
 		uint32_t appID = w->steamAppID;
+		if ( appID == 0 && w->appID == 0 )
+			appID = get_inherited_app_id( ctx, w );
 
 		if ( w->appID != 0 && appID != 0 && w->appID != appID )
 		{
@@ -5360,6 +5418,8 @@ map_win(xwayland_ctx_t* ctx, Window id, unsigned long sequence)
 	// Fixes mangoapp usage when nested, and not in SteamOS.
 	if ( w->isExternalOverlay )
 		w->appID = 0;
+	else if ( steamMode && w->steamAppID != 0 )
+		share_app_id_with_siblings( ctx, w );
 
 	w->oulTargetVROverlay = get_u64_prop(ctx, w->xwayland().id, ctx->atoms.steamGamescopeVROverlayTarget);
 	if ( w->oulTargetVROverlay )
@@ -6503,6 +6563,8 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		{
 			uint32_t appID = get_prop(ctx, w->xwayland().id, ctx->atoms.gameAtom, 0);
 			w->steamAppID = appID;
+			if ( appID == 0 && steamMode )
+				appID = get_inherited_app_id( ctx, w );
 
 			if ( w->appID != 0 && appID != 0 && w->appID != appID )
 			{
@@ -6511,6 +6573,8 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 			w->appID = appID;
 			if ( w->isExternalOverlay )
 				w->appID = 0;
+			if ( w->steamAppID != 0 && steamMode )
+				share_app_id_with_siblings( ctx, w );
 
 			MakeFocusDirty();
 		}

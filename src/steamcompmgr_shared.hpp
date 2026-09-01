@@ -115,6 +115,7 @@ struct steamcompmgr_win_t {
 	uint32_t inputFocusMode = 0;
 	uint32_t appID = 0;
 	uint32_t steamAppID = 0;
+	std::string wmClass;
 	bool isOverlay = false;
 	bool isExternalOverlay = false;
 
