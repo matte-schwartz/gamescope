@@ -943,6 +943,17 @@ global_focus_t *GetCurrentMouseFocus()
 	return GetCurrentFocus();
 }
 
+global_focus_t *GetCurrentGamepadFocus()
+{
+	uint64_t ulKey = GetBackend()->GetCurrentGamepadConnector() ? GetBackend()->GetCurrentGamepadConnector()->GetVirtualConnectorKey() : 0;
+
+	auto iter = g_VirtualConnectorFocuses.find( ulKey );
+	if ( iter != g_VirtualConnectorFocuses.end() )
+		return &iter->second;
+
+	return GetCurrentFocus();
+}
+
 // The focus whose focusWindow is w, ignoring the other window roles.
 // Guards w because a null one would match any focus without a window.
 global_focus_t *GetFocusForWindow( steamcompmgr_win_t *w )
@@ -5159,17 +5170,20 @@ determine_and_apply_focus( global_focus_t *pFocus )
 		focused_keyboard_display = get_win_display_name(pFocus->keyboardFocusWindow);
 	}
 
+	// Steam routes the controller by the focused app, so it follows the gamepad focus.
+	if ( steamMode && pFocus == GetCurrentGamepadFocus() )
+	{
+		XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusedAppAtom, XA_CARDINAL, 32, PropModeReplace,
+						(unsigned char *)&focusedAppId, focusedAppId != 0 ? 1 : 0 );
+
+		XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusedAppGfxAtom, XA_CARDINAL, 32, PropModeReplace,
+						(unsigned char *)&focusedBaseAppId, focusedBaseAppId != 0 ? 1 : 0 );
+
+		XFlush( root_ctx->dpy );
+	}
+
 	if ( pFocus == GetCurrentFocus() )
 	{
-		if ( steamMode )
-		{
-			XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusedAppAtom, XA_CARDINAL, 32, PropModeReplace,
-							(unsigned char *)&focusedAppId, focusedAppId != 0 ? 1 : 0 );
-
-			XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusedAppGfxAtom, XA_CARDINAL, 32, PropModeReplace,
-							(unsigned char *)&focusedBaseAppId, focusedBaseAppId != 0 ? 1 : 0 );
-		}
-
 		XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusedWindowAtom, XA_CARDINAL, 32, PropModeReplace,
 						(unsigned char *)&focusedWindow, focusedWindow != 0 ? 1 : 0 );
 

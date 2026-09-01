@@ -791,6 +791,11 @@ namespace gamescope
         {
             return m_pMouseFocusConnector;
         }
+        virtual IBackendConnector *GetCurrentGamepadConnector() override
+        {
+            COpenVRConnector *pConnector = m_pGamepadFocusConnector.load();
+            return pConnector ? pConnector : m_pKeyboardFocusConnector.load();
+        }
 		virtual IBackendConnector *GetConnector( GamescopeScreenType eScreenType ) override
 		{
 			if ( eScreenType == GAMESCOPE_SCREEN_TYPE_INTERNAL )
@@ -932,6 +937,11 @@ namespace gamescope
                     openvr_log.debugf( "Changed keyboard focus connector to %p ", pConnector.get() );
                     update_connector_display_info_wl( NULL );
                 }
+            }
+
+            {
+                COpenVRConnector *pExpected = nullptr;
+                m_pGamepadFocusConnector.compare_exchange_strong( pExpected, pConnector.get() );
             }
 
             std::scoped_lock lock{ m_mutActiveConnectors };
@@ -1121,30 +1131,49 @@ namespace gamescope
             UpdateLaserMouseFocusConnector( GetConnectorByOverlayHandle( ulFocusOverlay ) );
         }
 
-        void SetKeyboardFocus( uint64_t ulFocusOverlay )
+        static constexpr uint32_t k_uInputFocusFlagsAll =
+            vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForKeyboardInput |
+            vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForGamepadInput;
+
+        // SteamVR grants keyboard focus to whatever the laser rests on, so only a
+        // grant that asks for gamepad focus moves the controller.
+        void SetKeyboardFocus( uint64_t ulFocusOverlay, uint32_t uFlags = k_uInputFocusFlagsAll )
         {
-            uint64_t oldOverlayHandle = g_FocusedVROverlayKeyboard.exchange( ulFocusOverlay );
+            // A grant without either bit predates the flags, treat it as both.
+            if ( !( uFlags & k_uInputFocusFlagsAll ) )
+                uFlags = k_uInputFocusFlagsAll;
 
-            if ( oldOverlayHandle == ulFocusOverlay )
-                return;
-
-            openvr_log.debugf( "Changing keyboard focus from %lx to %lx", oldOverlayHandle, ulFocusOverlay );
-
-            COpenVRConnector *pInputConnector = nullptr;
-            if ( ulFocusOverlay != vr::k_ulOverlayHandleInvalid )
+            bool bChanged = false;
+            if ( uFlags & vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForKeyboardInput )
             {
-                COpenVRPlane *pInputPlane = GetPlaneByOverlayHandle( ulFocusOverlay );
-                if ( pInputPlane )
+                uint64_t oldOverlayHandle = g_FocusedVROverlayKeyboard.exchange( ulFocusOverlay );
+                if ( oldOverlayHandle != ulFocusOverlay )
                 {
-                    pInputConnector = pInputPlane->GetConnector();
+                    openvr_log.debugf( "Changing keyboard focus from %lx to %lx (flags 0x%x)", oldOverlayHandle, ulFocusOverlay, uFlags );
+                    bChanged = true;
                 }
             }
 
+            COpenVRConnector *pInputConnector = GetConnectorByOverlayHandle( ulFocusOverlay );
             if ( pInputConnector )
             {
-                openvr_log.debugf( "Changing keyboard focus connector to %p", pInputConnector );
-                m_pKeyboardFocusConnector.exchange( pInputConnector );
+                if ( ( uFlags & vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForKeyboardInput ) &&
+                     m_pKeyboardFocusConnector.exchange( pInputConnector ) != pInputConnector )
+                {
+                    openvr_log.debugf( "Changing keyboard focus connector to %p", pInputConnector );
+                    bChanged = true;
+                }
+
+                if ( ( uFlags & vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForGamepadInput ) &&
+                     m_pGamepadFocusConnector.exchange( pInputConnector ) != pInputConnector )
+                {
+                    openvr_log.debugf( "Changing gamepad focus connector to %p", pInputConnector );
+                    bChanged = true;
+                }
             }
+
+            if ( !bChanged )
+                return;
 
             // Switch cursor to be driven by the real/steaminput mouse, unless there's still a laser mouse pointing at us.
             UpdateLaserMouseFocusConnector( GetConnectorByOverlayHandle( g_FocusedVROverlayMouse ) );
@@ -1378,7 +1407,7 @@ namespace gamescope
                 case vr::VREvent_OverlayInputFocusChanged:
                     {
                         const vr::VREvent_Data_Gamescope_t &data = CastToGamescopeEventData( vrEvent.data );
-                        SetKeyboardFocus( data.overlayInputFocus.overlayHandle );
+                        SetKeyboardFocus( data.overlayInputFocus.overlayHandle, data.overlayInputFocus.flags );
                     }
                     break;
                 case vr::VREvent_MouseButtonUp:
@@ -1581,6 +1610,7 @@ namespace gamescope
         std::mutex m_mutActiveConnectors;
         std::atomic<COpenVRConnector *> m_pMouseFocusConnector;
         std::atomic<COpenVRConnector *> m_pKeyboardFocusConnector;
+        std::atomic<COpenVRConnector *> m_pGamepadFocusConnector;
 
         std::atomic<bool> m_bInitted = { false };
         std::atomic<bool> m_bRunning = { false };
@@ -1623,6 +1653,8 @@ namespace gamescope
         m_pBackend->m_pMouseFocusConnector.compare_exchange_strong( pThis, nullptr );
         pThis = this;
         m_pBackend->m_pKeyboardFocusConnector.compare_exchange_strong( pThis, nullptr );
+        pThis = this;
+        m_pBackend->m_pGamepadFocusConnector.compare_exchange_strong( pThis, nullptr );
     }
     GamescopeScreenType COpenVRConnector::GetScreenType() const
     {
@@ -2032,7 +2064,10 @@ namespace gamescope
 
                 bool bChanged = false;
                 if ( bTakeKeyboard )
+                {
                     bChanged |= m_pBackend->m_pKeyboardFocusConnector.exchange( this ) != this;
+                    bChanged |= m_pBackend->m_pGamepadFocusConnector.exchange( this ) != this;
+                }
                 if ( bTakeMouse )
                     bChanged |= m_pBackend->m_pMouseFocusConnector.exchange( this ) != this;
 

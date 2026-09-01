@@ -357,6 +357,11 @@ namespace gamescope
         {
             return this->GetCurrentConnector();
         }
+        // The connector Steam routes the controller to.
+        virtual IBackendConnector *GetCurrentGamepadConnector()
+        {
+            return this->GetCurrentConnector();
+        }
         virtual IBackendConnector *GetConnector( GamescopeScreenType eScreenType ) = 0;
 
         virtual bool SupportsPlaneHardwareCursor() const = 0;
