@@ -367,6 +367,7 @@ void wlserver_open_steam_menu( bool qam )
 
 static void wlserver_drag_anchor_release();
 static void wlserver_drag_anchor_forget( struct wlr_surface *surface );
+static void wlserver_clampcursor();
 
 static void wlserver_handle_pointer_button(struct wl_listener *listener, void *data)
 {
@@ -2638,6 +2639,20 @@ static void wlserver_drag_anchor_release()
 	if ( wlserver_input_held() )
 		return;
 
+	// The held overshoot is over, pull the cursor back inside the window and
+	// tell the client where it ended up, a later click may come with no motion.
+	double flPreClampX = wlserver.mouse_surface_cursorx;
+	double flPreClampY = wlserver.mouse_surface_cursory;
+	wlserver_clampcursor();
+	if ( flPreClampX != wlserver.mouse_surface_cursorx || flPreClampY != wlserver.mouse_surface_cursory )
+	{
+		double sx = wlserver.mouse_surface_cursorx;
+		double sy = wlserver.mouse_surface_cursory;
+		wlserver_drag_anchor_apply( sx, sy );
+		wlr_seat_pointer_notify_motion( wlserver.wlr.seat, 0, sx, sy );
+		wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
+	}
+
 	if ( !wlserver.drag_anchor.surface )
 	{
 		// A press without a drag ends any pending settle.
@@ -2653,9 +2668,38 @@ static void wlserver_drag_anchor_release()
 	nudge_steamcompmgr();
 }
 
+// The X screen the surface's Xwayland server shows, in the same pixels as
+// the surface extent.
+static std::pair<int, int> wlserver_get_screen_extent( struct wlr_surface *surf )
+{
+	if ( !surf )
+		return { 0, 0 };
+
+	wlserver_wl_surface_info *info = get_wl_surface_info( surf );
+	if ( !info || !info->x11_surface )
+		return { 0, 0 };
+
+	struct wlr_output *output = info->x11_surface->xwayland_server->get_output();
+	if ( !output )
+		return { 0, 0 };
+
+	return { output->width, output->height };
+}
+
 static std::pair<int, int> wlserver_get_cursor_bounds()
 {
 	auto [nWidth, nHeight] = wlserver_get_surface_extent( wlserver.mouse_focus_surface );
+
+	// A press takes an implicit X grab, so motion past the window edge still
+	// reaches the pressed window, and growing a window by its edge needs the
+	// pointer to lead it. Hovering keeps the surface clamp.
+	if ( wlserver_input_held() )
+	{
+		auto [nScreenWidth, nScreenHeight] = wlserver_get_screen_extent( wlserver.mouse_focus_surface );
+		nWidth = std::max( nWidth, nScreenWidth );
+		nHeight = std::max( nHeight, nScreenHeight );
+	}
+
 	for ( auto iter : wlserver.current_dropdown_surfaces )
 	{
 		auto [nDropdownX, nDropdownY] = iter.second;
