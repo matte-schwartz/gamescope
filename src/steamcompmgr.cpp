@@ -6258,6 +6258,8 @@ handle_system_tray_opcode(xwayland_ctx_t *ctx, XClientMessageEvent *ev)
 	}
 }
 
+gamescope::ConVar<bool> cv_virtual_connector_refuse_iconify( "virtual_connector_refuse_iconify", true, "Put a window shown on its own virtual connector straight back to normal state when it asks to be iconified." );
+
 /* See http://tronche.com/gui/x/icccm/sec-4.html#s-4.1.4 */
 static void
 handle_wm_change_state(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, XClientMessageEvent *ev)
@@ -6265,6 +6267,15 @@ handle_wm_change_state(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, XClientMessag
 	long state = ev->data.l[0];
 
 	if (state == ICCCM_ICONIC_STATE) {
+		// FIXME: Wine minimizes an exclusive-fullscreen game that loses foreground, and on its own
+		// virtual connector it stays on screen regardless. A game per Xwayland is the real fix, this flashes black once.
+		if ( cv_virtual_connector_refuse_iconify && !gamescope::VirtualConnectorIsSingleOutput() && GetFocusForWindow( w ) )
+		{
+			xwm_log.debugf("Refusing WM_CHANGE_STATE to ICONIC for window 0x%lx on its own virtual connector", w->xwayland().id);
+			set_wm_state( ctx, w->xwayland().id, ICCCM_NORMAL_STATE );
+			return;
+		}
+
 		xwm_log.debugf("Faking WM_CHANGE_STATE to ICONIC for window 0x%lx", w->xwayland().id);
 		set_wm_state( ctx, w->xwayland().id, ICCCM_ICONIC_STATE );
 	} else {
