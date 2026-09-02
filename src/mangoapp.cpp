@@ -2,6 +2,8 @@
 #include <unistd.h>
 #include <sys/msg.h>
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -58,6 +60,9 @@ struct MangoappRawMsg_t
     long mtype;
     uint8_t data[1016];
 };
+// The control layout is folded straight out of one of these.
+static_assert(offsetof(MangoappRawMsg_t, data) == sizeof(long));
+static_assert(sizeof(MangoappRawMsg_t) >= sizeof(mangoapp_ctrl_msgid1_v1));
 
 // The queue outlives gamescope and types start over every run, so leave nothing behind.
 void mangoapp_drop_stream( uint32_t uMsgType )
@@ -96,16 +101,13 @@ struct MangoappPendingControl_t
 static std::vector<MangoappPendingControl_t> s_PendingControl;
 
 // System V hands each message to one reader, so fan it out to every instance.
-// Returns how many sends are still waiting for room.
-uint32_t mangoapp_relay_control( const std::vector<uint32_t> &msgTypes )
+// Drains even with no instance, so the caller still sees what was asked.
+// Sends still waiting for room, in order. Returns how many remain.
+uint32_t mangoapp_flush_control( const std::vector<uint32_t> &msgTypes )
 {
-    if (msgTypes.empty())
-        return 0;
-
     if (!inited)
         init_mangoapp();
 
-    // Finish the last fan-out first, so no instance sees commands out of order.
     while (!s_PendingControl.empty())
     {
         const MangoappPendingControl_t &pending = s_PendingControl.front();
@@ -114,6 +116,17 @@ uint32_t mangoapp_relay_control( const std::vector<uint32_t> &msgTypes )
             return (uint32_t) s_PendingControl.size();
         s_PendingControl.erase(s_PendingControl.begin());
     }
+    return 0;
+}
+
+MangoappControlRelay_t mangoapp_relay_control( const std::vector<uint32_t> &msgTypes )
+{
+    MangoappControlRelay_t relay;
+
+    // Finish the last fan-out first, so no instance sees commands out of order.
+    relay.uHeldBack = mangoapp_flush_control( msgTypes );
+    if (relay.uHeldBack)
+        return relay;
 
     uint32_t uDeferred = 0;
     MangoappRawMsg_t rawMsg;
@@ -126,6 +139,8 @@ uint32_t mangoapp_relay_control( const std::vector<uint32_t> &msgTypes )
         // Truncated, so fanning it out would hand every instance a corrupt message.
         if (size == ssize_t(sizeof(rawMsg.data)))
             continue;
+
+        mangoapp_fold_control(&rawMsg, sizeof(long) + size, relay);
 
         // A type nobody reads yet holds the message until that instance starts.
         for (uint32_t uMsgType : msgTypes)
@@ -142,7 +157,34 @@ uint32_t mangoapp_relay_control( const std::vector<uint32_t> &msgTypes )
         if (uDeferred)
             break;
     }
-    return uDeferred;
+    relay.uHeldBack = uDeferred;
+    return relay;
+}
+
+// A fresh instance starts on the file alone, so what mangohudctl asked goes over its own control type.
+void mangoapp_post_control( uint32_t uMsgType, uint8_t uNoDisplay, bool bStartLogging )
+{
+    if (!inited)
+        init_mangoapp();
+
+    mangoapp_ctrl_msgid1_v1 ctrl = {};
+    ctrl.hdr.msg_type = MangoappControlMsgType(uMsgType);
+    ctrl.hdr.ctrl_msg_type = 1;
+    ctrl.hdr.version = 1;
+    ctrl.no_display = uNoDisplay;
+    ctrl.log_session = bStartLogging ? 1 : 0;
+
+    MangoappPendingControl_t pending = { .uMsgType = uMsgType, .size = sizeof(ctrl) - sizeof(long) };
+    memcpy(&pending.msg, &ctrl, sizeof(ctrl));
+    // Behind anything still held back, so no instance sees commands out of order.
+    if (!s_PendingControl.empty() || msgsnd(msgid, &pending.msg, pending.size, IPC_NOWAIT) < 0)
+        s_PendingControl.push_back(pending);
+
+    // An untagged mangoapp reads the shared type instead. A tagged one never does, so the relay
+    // hands this copy back to it, and both commands are sets, so the repeat changes nothing.
+    pending.msg.mtype = k_uMangoappControlMsgType;
+    if (!s_PendingControl.empty() || msgsnd(msgid, &pending.msg, pending.size, IPC_NOWAIT) < 0)
+        s_PendingControl.push_back(pending);
 }
 
 void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uint64_t latency_ns, uint32_t uMsgType ) {

@@ -46,6 +46,7 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <filesystem>
 #include <unordered_map>
@@ -57,6 +58,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/poll.h>
+#include <sys/inotify.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/types.h>
@@ -82,6 +84,7 @@
 #include "rendervulkan.hpp"
 #include "steamcompmgr.hpp"
 #include "focus_placement.h"
+#include "mangoapp_config.h"
 #include "vblankmanager.hpp"
 #include "log.hpp"
 #include "Utils/Defer.h"
@@ -9105,7 +9108,10 @@ struct MangoappInstance_t
 {
 	uint32_t uMsgType = 0;
 	pid_t nReaperPid = -1;
+	uint64_t ulUnwantedSinceNs = 0;
 };
+
+gamescope::ConVar<int> cv_mangoapp_teardown_grace_ms{ "mangoapp_teardown_grace_ms", 10000, "Keep a per-connector mangoapp this long after it stops being wanted" };
 
 // Key -> spawned mangoapp. Steamcompmgr thread only.
 static std::unordered_map<gamescope::VirtualConnectorKey_t, MangoappInstance_t> s_MangoappInstances;
@@ -9119,10 +9125,116 @@ static uint32_t mangoapp_msg_type_for_key( gamescope::VirtualConnectorKey_t ulKe
 	return iter != s_MangoappInstances.end() ? iter->second.uMsgType : 0;
 }
 
+// Steam toggles the overlay by rewriting MANGOHUD_CONFIGFILE, a hidden instance still costs a GL context and a swapchain.
+static std::filesystem::path s_MangoappConfigPath;
+static bool s_bMangoappConfigVisible = true;
+// mangohudctl can show or hide without touching the file, until the next reload.
+static std::optional<bool> s_obMangoappControlVisible;
+// A mangohudctl logging session, mangoapp logs hidden and a reload stops it.
+static bool s_bMangoappLogging = false;
+static std::unique_ptr<gamescope::CFunctionWaitable> s_pMangoappConfigWaitable;
+
+static void ReadMangoappConfig()
+{
+	std::string sConfig;
+	if ( !s_MangoappConfigPath.empty() )
+	{
+		std::ifstream file( s_MangoappConfigPath );
+		// Steam may be between a delete and a rewrite, keep what we had.
+		if ( !file )
+			return;
+		sConfig.assign( std::istreambuf_iterator<char>( file ), std::istreambuf_iterator<char>() );
+	}
+
+	const char *pszEnvConfig = getenv( "MANGOHUD_CONFIG" );
+	bool bVisible = mangoapp_config_visible( sConfig, pszEnvConfig ? pszEnvConfig : "" );
+	if ( bVisible != s_bMangoappConfigVisible )
+		xwm_log.infof( "mangoapp config now %s the overlay", bVisible ? "shows" : "hides" );
+	s_bMangoappConfigVisible = bVisible;
+	// A reload puts every instance back on the file's state and stops its logging.
+	s_obMangoappControlVisible.reset();
+	s_bMangoappLogging = false;
+}
+
+static void WatchMangoappConfig()
+{
+	// Not the convar, the watch has to outlive a runtime flip of it.
+	if ( !g_bLaunchMangoapp || !GetBackend()->UsesVirtualConnectors() || !steamMode )
+		return;
+
+	const char *pszConfigPath = getenv( "MANGOHUD_CONFIGFILE" );
+	if ( pszConfigPath && *pszConfigPath )
+		s_MangoappConfigPath = pszConfigPath;
+	ReadMangoappConfig();
+
+	if ( s_MangoappConfigPath.empty() )
+		return;
+
+	int nFD = inotify_init1( IN_NONBLOCK | IN_CLOEXEC );
+	if ( nFD < 0 )
+	{
+		xwm_log.errorf_errno( "inotify_init1 failed, mangoapp visibility will not follow the config" );
+		return;
+	}
+
+	// The directory, so a rewrite by rename is seen, without IN_MODIFY so a half-written file is not.
+	std::filesystem::path dir = s_MangoappConfigPath.parent_path();
+	if ( dir.empty() )
+		dir = ".";
+	if ( inotify_add_watch( nFD, dir.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE ) < 0 )
+	{
+		xwm_log.errorf_errno( "Failed to watch %s", dir.c_str() );
+		close( nFD );
+		return;
+	}
+
+	s_pMangoappConfigWaitable = std::make_unique<gamescope::CFunctionWaitable>( nFD, [ nFD ]()
+	{
+		alignas( struct inotify_event ) char buf[ 4096 ];
+		bool bChanged = false;
+		for (;;)
+		{
+			ssize_t nRead = read( nFD, buf, sizeof( buf ) );
+			if ( nRead <= 0 )
+				break;
+			for ( ssize_t nOffset = 0; nOffset < nRead; )
+			{
+				const struct inotify_event *pEvent = reinterpret_cast<const struct inotify_event *>( buf + nOffset );
+				// An overflow may have eaten ours, a re-read is cheap.
+				if ( pEvent->mask & IN_Q_OVERFLOW )
+					bChanged = true;
+				else if ( pEvent->len && s_MangoappConfigPath.filename().native() == pEvent->name )
+					bChanged = true;
+				nOffset += sizeof( *pEvent ) + pEvent->len;
+			}
+		}
+		if ( bChanged )
+			ReadMangoappConfig();
+	});
+	g_SteamCompMgrWaiter.AddWaitable( s_pMangoappConfigWaitable.get() );
+}
+
+static bool mangoapp_overlay_visible()
+{
+	return s_obMangoappControlVisible.value_or( s_bMangoappConfigVisible );
+}
+
+// Only where Steam drives the overlay. Elsewhere mangoapp's own keybinds are how it comes back, and they need it running.
+static bool mangoapp_instances_wanted()
+{
+	if ( !steamMode )
+		return true;
+
+	// Hidden, a logging instance still has work to do.
+	return mangoapp_overlay_visible() || s_bMangoappLogging;
+}
+
 static void UpdateMangoappInstances()
 {
 	if ( !mangoapp_per_connector() )
 		return;
+
+	const bool bWanted = mangoapp_instances_wanted();
 
 	static bool s_bLoggedSpawnFail = false;
 	for ( const auto &iter : g_VirtualConnectorFocuses )
@@ -9135,7 +9247,7 @@ static void UpdateMangoappInstances()
 		if ( !iter.second.focusWindow )
 			continue;
 
-		if ( s_MangoappInstances.contains( iter.first ) )
+		if ( !bWanted || s_MangoappInstances.contains( iter.first ) )
 			continue;
 
 		// The control type is the stream type plus one, so types go in pairs.
@@ -9164,11 +9276,31 @@ static void UpdateMangoappInstances()
 
 		s_uNextMangoappMsgType += 2;
 		s_MangoappInstances[ iter.first ] = MangoappInstance_t{ .uMsgType = uMsgType, .nReaperPid = nPid };
+
+		// The new instance starts on the file, so hand it what mangohudctl asked since.
+		uint8_t uNoDisplay = 0;
+		if ( mangoapp_overlay_visible() != s_bMangoappConfigVisible )
+			uNoDisplay = mangoapp_overlay_visible() ? 2 : 1;
+		if ( uNoDisplay || s_bMangoappLogging )
+			mangoapp_post_control( uMsgType, uNoDisplay, s_bMangoappLogging );
 	}
 
+	const uint64_t ulNow = get_time_in_nanos();
 	for ( auto iter = s_MangoappInstances.begin(); iter != s_MangoappInstances.end(); )
 	{
-		if ( !g_VirtualConnectorFocuses.contains( iter->first ) )
+		const bool bGone = !g_VirtualConnectorFocuses.contains( iter->first );
+		if ( !bGone )
+		{
+			// A stopped logging session is still writing its files, and a quick flip back is free.
+			if ( bWanted )
+				iter->second.ulUnwantedSinceNs = 0;
+			else if ( !iter->second.ulUnwantedSinceNs )
+				iter->second.ulUnwantedSinceNs = ulNow;
+		}
+		const uint64_t ulGraceNs = uint64_t( std::max( 0, int( cv_mangoapp_teardown_grace_ms ) ) ) * 1'000'000ul;
+		const bool bExpired = iter->second.ulUnwantedSinceNs && ulNow - iter->second.ulUnwantedSinceNs >= ulGraceNs;
+
+		if ( bGone || bExpired )
 		{
 			pid_t nReaperPid = iter->second.nReaperPid;
 			gamescope::Process::KillProcess( nReaperPid, SIGTERM );
@@ -9241,7 +9373,8 @@ static void publish_mangoapp_connector_snapshots()
 	for ( auto &iter : g_VirtualConnectorFocuses )
 	{
 		uint32_t uMsgType = iter.second.externalOverlayWindow ? iter.second.externalOverlayWindow->uMangoappMsgType : 0;
-		if ( !uMsgType )
+		// The window of a torn-down instance lingers a few frames, its type is gone.
+		if ( !uMsgType || uMsgType != mangoapp_msg_type_for_key( iter.first ) )
 			continue;
 
 		auto &lastBasePlane = s_LastBasePlanes[ uMsgType ];
@@ -9257,7 +9390,22 @@ static void publish_mangoapp_connector_snapshots()
 // mangohudctl posts one control message for every instance to act on.
 static void relay_mangoapp_control()
 {
-	if ( !GetBackend()->UsesVirtualConnectors() || s_MangoappInstances.empty() )
+	if ( !mangoapp_per_connector() )
+		return;
+
+	// Every spawned instance, one still starting finds the message when it reads.
+	std::vector<uint32_t> msgTypes;
+	msgTypes.reserve( s_MangoappInstances.size() );
+	for ( const auto &iter : s_MangoappInstances )
+		msgTypes.push_back( iter.second.uMsgType );
+
+	// Sends that did not fit go out whether or not the drain below runs, an untagged reader waits on them too.
+	static bool s_bLoggedHeldBack = false;
+	uint32_t uHeldBack = mangoapp_flush_control( msgTypes );
+	if ( uHeldBack && !s_bLoggedHeldBack )
+		xwm_log.warnf( "Holding back %u mangoapp control message(s), the queue is full", uHeldBack );
+	s_bLoggedHeldBack = uHeldBack != 0;
+	if ( uHeldBack )
 		return;
 
 	// An untagged mangoapp reads the control type itself, so leave the queue alone.
@@ -9278,20 +9426,27 @@ static void relay_mangoapp_control()
 			}
 		}
 	}
-	if ( !bAnyTagged )
+	// With no instance there is nothing to mistake, and a show has to be seen to spawn one.
+	if ( !bAnyTagged && !s_MangoappInstances.empty() )
 		return;
 
-	// Every spawned instance, one still starting finds the message when it reads.
-	std::vector<uint32_t> msgTypes;
-	msgTypes.reserve( s_MangoappInstances.size() );
-	for ( const auto &iter : s_MangoappInstances )
-		msgTypes.push_back( iter.second.uMsgType );
+	// Drained messages are folded even when their fan-out is held back, they are off the shared type now.
+	MangoappControlRelay_t relay = mangoapp_relay_control( msgTypes );
+	if ( relay.uHeldBack && !s_bLoggedHeldBack )
+		xwm_log.warnf( "Holding back %u mangoapp control message(s), the queue is full", relay.uHeldBack );
+	s_bLoggedHeldBack = relay.uHeldBack != 0;
 
-	uint32_t uHeldBack = mangoapp_relay_control( msgTypes );
-	static bool s_bLoggedHeldBack = false;
-	if ( uHeldBack && !s_bLoggedHeldBack )
-		xwm_log.warnf( "Holding back %u mangoapp control message(s), the queue is full", uHeldBack );
-	s_bLoggedHeldBack = uHeldBack != 0;
+	// Same order mangoapp applies them, the reload first and then no_display on top.
+	if ( relay.bReloadConfig )
+		ReadMangoappConfig();
+	if ( relay.obHide )
+		s_obMangoappControlVisible = !*relay.obHide;
+	else if ( relay.bToggle )
+		s_obMangoappControlVisible = !mangoapp_overlay_visible();
+	if ( relay.obLogging )
+		s_bMangoappLogging = *relay.obLogging;
+	else if ( relay.bToggleLogging )
+		s_bMangoappLogging = !s_bMangoappLogging;
 }
 
 void
@@ -9441,6 +9596,7 @@ steamcompmgr_main(int argc, char **argv)
 	g_SteamCompMgrWaiter.AddWaitable( &GetVBlankTimer() );
 	g_SteamCompMgrWaiter.AddWaitable( &g_FPSLimitVRRTimer );
 	GetVBlankTimer().ArmNextVBlank( true );
+	WatchMangoappConfig();
 
 	{
 		gamescope_xwayland_server_t *pServer = NULL;
