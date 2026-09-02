@@ -4317,6 +4317,8 @@ static void set_wm_state( xwayland_ctx_t *ctx, Window win, uint32_t state )
 
 void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win_t* > &vecPossibleFocusWindows )
 {
+	// A bump during the pass has to leave the focus dirty.
+	uint64_t ulFocusSerial = GetFocusSerial();
 	xwayland_ctx_t *ctx = this;
 
 	steamcompmgr_win_t *inputFocus = NULL;
@@ -4632,7 +4634,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 
 	XFree(children);
 
-	ctx->focus.ulCurrentFocusSerial = GetFocusSerial();
+	ctx->focus.ulCurrentFocusSerial = ulFocusSerial;
 }
 
 wlr_surface *win_surface(steamcompmgr_win_t *window)
@@ -4776,6 +4778,8 @@ DumpFocusInfo()
 static void
 determine_and_apply_focus( global_focus_t *pFocus )
 {
+	// A bump during the pass has to leave the focus dirty.
+	uint64_t ulFocusSerial = GetFocusSerial();
 	gamescope_xwayland_server_t *root_server = wlserver_get_xwayland_server(0);
 	xwayland_ctx_t *root_ctx = root_server->ctx.get();
 	global_focus_t previousLocalFocus = *pFocus;
@@ -5250,7 +5254,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 		wlserver_unlock();
 	}
 
-	pFocus->ulCurrentFocusSerial = GetFocusSerial();
+	pFocus->ulCurrentFocusSerial = ulFocusSerial;
 }
 
 static void
