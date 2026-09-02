@@ -9131,6 +9131,10 @@ static void UpdateMangoappInstances()
 		if ( gamescope::VirtualConnectorKeyIsSteam( iter.first ) )
 			continue;
 
+		// Nothing to overlay yet. Key 0 under PerAppId never gets a window at all.
+		if ( !iter.second.focusWindow )
+			continue;
+
 		if ( s_MangoappInstances.contains( iter.first ) )
 			continue;
 
