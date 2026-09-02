@@ -3399,6 +3399,31 @@ static bool vulkan_make_output_images( VulkanOutput_t *pOutput )
 	return true;
 }
 
+// Without a swapchain the shared images are ours to make, so they wait for their first use.
+static bool vulkan_defer_output_images()
+{
+	return !GetBackend()->UsesVulkanSwapchain();
+}
+
+static bool vulkan_ensure_output_images()
+{
+	if ( !vulkan_defer_output_images() )
+		return true;
+
+	VulkanOutput_t *pOutput = &g_output;
+	if ( !pOutput->outputImages.empty() && pOutput->outputImages[0] )
+		return true;
+
+	vk_log.debugf( "Making the shared output images on first use" );
+	if ( vulkan_make_output_images( pOutput ) )
+		return true;
+
+	// A half-made set would pass the check above, so the next use tries again from nothing.
+	pOutput->outputImages.clear();
+	pOutput->outputImagesPartialOverlay.clear();
+	return false;
+}
+
 bool vulkan_remake_output_images()
 {
 	VulkanOutput_t *pOutput = &g_output;
@@ -3411,6 +3436,14 @@ bool vulkan_remake_output_images()
 		pScreenshotTexture = nullptr;
 	for (auto& pCaptureTexture : pOutput->pCaptureTextures)
 		pCaptureTexture = nullptr;
+
+	if ( vulkan_defer_output_images() )
+	{
+		pOutput->outputImages.clear();
+		pOutput->outputImagesPartialOverlay.clear();
+		pOutput->temporaryHackyBlankImage = vulkan_create_debug_blank_texture();
+		return true;
+	}
 
 	bool bRet = vulkan_make_output_images( pOutput );
 	assert( bRet );
@@ -3490,7 +3523,9 @@ bool vulkan_make_output()
 			return false;
 		}
 
-		if ( !vulkan_make_output_images( pOutput ) )
+		if ( vulkan_defer_output_images() )
+			pOutput->temporaryHackyBlankImage = vulkan_create_debug_blank_texture();
+		else if ( !vulkan_make_output_images( pOutput ) )
 			return false;
 	}
 
@@ -4091,6 +4126,9 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 	{
 		g_reshadeManager.clear();
 	}
+
+	if ( !pOutputOverride && !vulkan_ensure_output_images() )
+		return std::nullopt;
 
 	gamescope::Rc<CVulkanTexture> compositeImage;
 	if ( pOutputOverride )
