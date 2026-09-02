@@ -4568,6 +4568,15 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 			ctx->cursor->hide();
 		}
 
+		// Both sides of an X focus move get a repaint from Wine.
+		if ( ctx->currentKeyboardFocusWindow != keyboardFocusWindow )
+		{
+			uint64_t ulNow = get_time_in_nanos();
+			if ( steamcompmgr_win_t *pOld = find_win( ctx, ctx->currentKeyboardFocusWindow ) )
+				pOld->last_focus_change_time = ulNow;
+			keyboardFocusWin->last_focus_change_time = ulNow;
+		}
+
 		ctx->focus.inputFocusWindow = inputFocus;
 		ctx->focus.inputFocusMode = inputFocus->inputFocusMode;
 		ctx->currentKeyboardFocusWindow = keyboardFocusWindow;
@@ -7991,6 +8000,7 @@ static TempUpscaleImage_t *GetTempUpscaleImage( global_focus_t *pFocus, uint32_t
 }
 
 gamescope::ConVar<bool> cv_surface_update_force_only_current_surface( "surface_update_force_only_current_surface", false, "Force updates to apply only to the current surface, ignoring commits for other surfaces." );
+gamescope::ConVar<uint64_t> cv_surface_update_focus_repaint_time( "surface_update_focus_repaint_time", 500'000'000ul, "Ignore commits for a window's other surfaces this long after its X focus changes, Wine repaints the window then. 0 disables. In nanoseconds." );
 
 void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, ResListEntry_t& reslistentry)
 {
@@ -8028,15 +8038,22 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 	bool bHasDamage = ( reslistentry.surf->buffer_damage.extents.x2 - reslistentry.surf->buffer_damage.extents.x1 ) > 2 &&
 					  ( reslistentry.surf->buffer_damage.extents.y2 - reslistentry.surf->buffer_damage.extents.y1 ) > 2;
 
+	// Wine repaints the X window when its foreground state changes, so for a while
+	// after a focus move an X commit beside the override surface is that, not content.
+	uint64_t ulNow = get_time_in_nanos();
+	bool bFocusRepaint = w->override_surface() && cv_surface_update_focus_repaint_time &&
+		ulNow - w->last_focus_change_time < cv_surface_update_focus_repaint_time;
+
 	// If we have an override surface, make sure this commit is for the current surface
 	// or if the commit is probably bogus.
-	bool bOnlyCurrentSurface = w->bHasHadNonSRGBColorSpace || bPossiblyBogus || !bHasDamage || cv_surface_update_force_only_current_surface;
+	bool bOnlyCurrentSurface = w->bHasHadNonSRGBColorSpace || bPossiblyBogus || !bHasDamage || bFocusRepaint || cv_surface_update_force_only_current_surface;
 
 	bool for_current_surface = !w->override_surface() || w->current_surface() == reslistentry.surf;
 
 	if ( !for_current_surface )
 	{
-		xwm_log.debugf( "Got commit not for current surface." );
+		xwm_log.debugf( "Got commit not for current surface, %s it, focus changed %.1f ms ago.",
+			bOnlyCurrentSurface ? "dropping" : "showing", ( ulNow - w->last_focus_change_time ) / 1'000'000.0 );
 	}
 
 	if ( bOnlyCurrentSurface && !for_current_surface )
