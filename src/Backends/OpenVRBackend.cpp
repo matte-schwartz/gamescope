@@ -76,6 +76,7 @@ gamescope::ConVar<bool> cv_vr_debug_force_opaque( "vr_debug_force_opaque", false
 gamescope::ConVar<bool> cv_vr_nudge_to_visible( "vr_nudge_to_visible", false, "" );
 gamescope::ConVar<bool> cv_vr_nudge_to_visible_per_connector( "vr_nudge_to_visible_per_connector", false, "" );
 gamescope::ConVar<bool> cv_vr_click_focus( "vr_click_focus", true, "Move keyboard focus to the overlay a click lands on, without waiting for SteamVR to grant it." );
+gamescope::ConVar<uint64_t> cv_vr_click_focus_hold( "vr_click_focus_hold", 100'000'000ul, "Longest time to hold a laser press while a keyboard focus change lands in X. 0 sends it at once. In nanoseconds." );
 
 // Maximum interval between polling for VR events (normally paced by frame sync)
 gamescope::ConVar<uint32_t> cv_vr_poll_rate( "vr_poll_rate", 50ul, "Max time between input polls. In milliseconds." );
@@ -1144,6 +1145,7 @@ namespace gamescope
                 uFlags = k_uInputFocusFlagsAll;
 
             bool bChanged = false;
+            bool bKeyboardConnectorChanged = false;
             if ( uFlags & vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForKeyboardInput )
             {
                 uint64_t oldOverlayHandle = g_FocusedVROverlayKeyboard.exchange( ulFocusOverlay );
@@ -1162,6 +1164,7 @@ namespace gamescope
                 {
                     openvr_log.debugf( "Changing keyboard focus connector to %p", pInputConnector );
                     bChanged = true;
+                    bKeyboardConnectorChanged = true;
                 }
 
                 if ( ( uFlags & vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForGamepadInput ) &&
@@ -1179,30 +1182,144 @@ namespace gamescope
             UpdateLaserMouseFocusConnector( GetConnectorByOverlayHandle( g_FocusedVROverlayMouse ) );
 
             MakeFocusDirty();
+            if ( bKeyboardConnectorChanged )
+                ArmKeyboardFocusSettle();
             nudge_steamcompmgr();
+        }
+
+        // A keyboard connector move has to land in X, and the game losing it
+        // needs a moment to drop its pointer grab, before a press can go out.
+        void ArmKeyboardFocusSettle()
+        {
+            m_bKeyboardFocusPending = true;
+            m_ulKeyboardFocusSerial = GetFocusSerial();
+        }
+
+        // Once per poll, steamcompmgr applies focus between polls. The poll after
+        // the move lands still waits, so the old game has had a frame to let go.
+        void PollKeyboardFocusSettle()
+        {
+            if ( m_nKeyboardFocusGracePolls )
+                m_nKeyboardFocusGracePolls--;
+
+            if ( m_bKeyboardFocusPending && GetAppliedFocusSerial() >= m_ulKeyboardFocusSerial )
+            {
+                m_bKeyboardFocusPending = false;
+                m_nKeyboardFocusGracePolls = 1;
+            }
+        }
+
+        bool IsKeyboardFocusSettling()
+        {
+            return m_bKeyboardFocusPending || m_nKeyboardFocusGracePolls > 0;
+        }
+
+        // A press sent through the old game's grab lands there, so hold it until the move has settled.
+        void HoldPress( uint32_t uButton, float flX, float flY )
+        {
+            m_HeldPress = {
+                .bActive = true,
+                .uButton = uButton,
+                .flX = flX,
+                .flY = flY,
+                .ulDeadline = get_time_in_nanos() + cv_vr_click_focus_hold,
+            };
+        }
+
+        void SendHeldPress()
+        {
+            if ( !m_HeldPress.bActive )
+                return;
+
+            uint32_t uButton = m_HeldPress.uButton;
+            bool bReleased = m_HeldPress.bReleased;
+            float flX = m_HeldPress.flX;
+            float flY = m_HeldPress.flY;
+            m_HeldPress = {};
+
+            // A release in the same poll would make a click no frame sees.
+            m_uReleaseNextPoll = bReleased ? uButton : 0;
+            SendButton( uButton, true, flX, flY );
+        }
+
+        static uint32_t HeldButtonBit( uint32_t uButton )
+        {
+            return 1u << ( uButton - BTN_LEFT );
+        }
+
+        // Every laser button goes through here so the held set stays true to what went out.
+        void SendButton( uint32_t uButton, bool bDown, float flX = 0.0f, float flY = 0.0f )
+        {
+            if ( bDown )
+                m_uHeldMouseButtons |= HeldButtonBit( uButton );
+            else
+                m_uHeldMouseButtons &= ~HeldButtonBit( uButton );
+
+            wlserver_lock();
+            if ( uButton == BTN_LEFT )
+            {
+                if ( bDown )
+                    wlserver_touchdown( flX, flY, 0, ++m_uFakeTimestamp );
+                else
+                    wlserver_touchup( 0, ++m_uFakeTimestamp );
+            }
+            else
+            {
+                wlserver_mousebutton( uButton, bDown, ++m_uFakeTimestamp );
+            }
+            wlserver_unlock();
+        }
+
+        void FlushHeldPress()
+        {
+            if ( !m_HeldPress.bActive )
+                return;
+
+            if ( !IsKeyboardFocusSettling() || get_time_in_nanos() >= m_HeldPress.ulDeadline )
+                SendHeldPress();
         }
 
         // SteamVR sends VREvent_MouseButtonUp to whichever overlay the laser is
         // over at release, so a press that started on us can end somewhere else.
         void ReleaseHeldMouse()
         {
-            if ( !m_uHeldMouseButton )
+            // A completed click still held goes out now, its release follows next poll.
+            if ( m_HeldPress.bReleased )
+            {
+                SendHeldPress();
                 return;
+            }
 
-            uint32_t uButton = m_uHeldMouseButton;
-            m_uHeldMouseButton = 0;
+            // A press still held was never sent, so there is nothing to release.
+            m_HeldPress = {};
 
-            wlserver_lock();
-            if ( uButton == BTN_LEFT )
-                wlserver_touchup( 0, ++m_uFakeTimestamp );
-            else
-                wlserver_mousebutton( uButton, false, ++m_uFakeTimestamp );
-            wlserver_unlock();
+            // A release already queued for next poll stays there, sent now it would share the press's frame.
+            uint32_t uButtons = m_uHeldMouseButtons;
+            if ( m_uReleaseNextPoll )
+                uButtons &= ~HeldButtonBit( m_uReleaseNextPoll );
+
+            for ( uint32_t uButton = BTN_LEFT; uButtons; uButton++ )
+            {
+                if ( !( uButtons & HeldButtonBit( uButton ) ) )
+                    continue;
+
+                uButtons &= ~HeldButtonBit( uButton );
+                SendButton( uButton, false );
+            }
         }
 
         void ProcessVRInput()
         {
             std::scoped_lock lock{m_mutActiveConnectors};
+
+            PollKeyboardFocusSettle();
+            if ( m_uReleaseNextPoll )
+            {
+                uint32_t uButton = m_uReleaseNextPoll;
+                m_uReleaseNextPoll = 0;
+                SendButton( uButton, false );
+            }
+            FlushHeldPress();
 
             vr::VREvent_t vrEvent;
             bool bDidScrollThisFrame = false;
@@ -1483,26 +1600,31 @@ namespace gamescope
                             else
                             {
                                 bool bDown = vrEvent.eventType == vr::VREvent_MouseButtonDown;
-                                wlserver_lock();
+                                uint32_t uButton = 0;
                                 if (vrEvent.data.mouse.button == vr::VRMouseButton_Left)
-                                {
-                                    m_uHeldMouseButton = bDown ? BTN_LEFT : 0;
-                                    if (bDown)
-                                        wlserver_touchdown(flX, flY, 0, ++m_uFakeTimestamp);
-                                    else
-                                        wlserver_touchup(0, ++m_uFakeTimestamp);
-                                }
+                                    uButton = BTN_LEFT;
                                 else if (vrEvent.data.mouse.button == vr::VRMouseButton_Right)
-                                {
-                                    m_uHeldMouseButton = bDown ? BTN_RIGHT : 0;
-                                    wlserver_mousebutton(BTN_RIGHT, bDown, ++m_uFakeTimestamp);
-                                }
+                                    uButton = BTN_RIGHT;
                                 else if (vrEvent.data.mouse.button == vr::VRMouseButton_Middle)
+                                    uButton = BTN_MIDDLE;
+
+                                // Another button would go out ahead of the press still held, so send that first.
+                                if ( uButton && m_HeldPress.bActive && !( !bDown && uButton == m_HeldPress.uButton ) )
+                                    SendHeldPress();
+
+                                if ( uButton && bDown && cv_vr_click_focus_hold && !m_uHeldMouseButtons && !m_HeldPress.bActive && IsKeyboardFocusSettling() )
                                 {
-                                    m_uHeldMouseButton = bDown ? BTN_MIDDLE : 0;
-                                    wlserver_mousebutton(BTN_MIDDLE, bDown, ++m_uFakeTimestamp);
+                                    HoldPress( uButton, flX, flY );
                                 }
-                                wlserver_unlock();
+                                else if ( uButton && !bDown && m_HeldPress.bActive && uButton == m_HeldPress.uButton )
+                                {
+                                    // The press has not gone out yet, so the release rides along with it.
+                                    m_HeldPress.bReleased = true;
+                                }
+                                else if ( uButton )
+                                {
+                                    SendButton( uButton, bDown, flX, flY );
+                                }
                             }
                         }
                     }
@@ -1595,8 +1717,28 @@ namespace gamescope
         std::atomic<uint32_t> m_uFakeTimestamp = { 0 };
 
         bool m_bMouseDown = false;
-        uint32_t m_uHeldMouseButton = 0;
+        // Laser buttons currently down, one bit per button from BTN_LEFT.
+        uint32_t m_uHeldMouseButtons = 0;
         uint64_t m_ulMouseDownTime = 0;
+
+        // A keyboard connector move steamcompmgr has not applied yet, then the
+        // polls the game that lost it gets to drop its grab.
+        bool m_bKeyboardFocusPending = false;
+        uint64_t m_ulKeyboardFocusSerial = 0;
+        int m_nKeyboardFocusGracePolls = 0;
+        // The button of a held press that just went out, released a poll later.
+        uint32_t m_uReleaseNextPoll = 0;
+
+        // A laser press held back until the keyboard focus change has settled.
+        struct
+        {
+            bool bActive = false;
+            bool bReleased = false;
+            uint32_t uButton = 0;
+            float flX = 0.0f;
+            float flY = 0.0f;
+            uint64_t ulDeadline = 0;
+        } m_HeldPress;
         // Fake "trackpad" tracking for the whole overlay panel.
         glm::vec2 m_vScreenTrackpadPos{};
         glm::vec2 m_vScreenStartTrackpadPos{};
@@ -2063,9 +2205,11 @@ namespace gamescope
                     !pMouseConnector->GetPlaneByOverlayHandle( g_FocusedVROverlayMouse.load() );
 
                 bool bChanged = false;
+                bool bKeyboardChanged = false;
                 if ( bTakeKeyboard )
                 {
-                    bChanged |= m_pBackend->m_pKeyboardFocusConnector.exchange( this ) != this;
+                    bKeyboardChanged = m_pBackend->m_pKeyboardFocusConnector.exchange( this ) != this;
+                    bChanged |= bKeyboardChanged;
                     bChanged |= m_pBackend->m_pGamepadFocusConnector.exchange( this ) != this;
                 }
                 if ( bTakeMouse )
@@ -2077,6 +2221,8 @@ namespace gamescope
                     update_connector_display_info_wl( NULL );
 
                     MakeFocusDirty();
+                    if ( bKeyboardChanged )
+                        m_pBackend->ArmKeyboardFocusSettle();
                     nudge_steamcompmgr();
                 }
             }

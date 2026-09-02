@@ -833,9 +833,15 @@ void MakeFocusDirty()
 	s_ulFocusSerial++;
 }
 
-static inline uint64_t GetFocusSerial()
+uint64_t GetFocusSerial()
 {
 	return s_ulFocusSerial;
+}
+
+static std::atomic<uint64_t> s_ulAppliedFocusSerial = 0ul;
+uint64_t GetAppliedFocusSerial()
+{
+	return s_ulAppliedFocusSerial;
 }
 
 bool focus_t::IsDirty()
@@ -952,6 +958,23 @@ global_focus_t *GetCurrentGamepadFocus()
 		return &iter->second;
 
 	return GetCurrentFocus();
+}
+
+// A held laser press waits on this, so flush the X focus before publishing it.
+// The focuses record what they applied, a serial bumped mid-pass is not claimed.
+static void publish_applied_focus_serial()
+{
+	uint64_t ulApplied = GetFocusSerial();
+	for ( auto &iter : g_VirtualConnectorFocuses )
+		ulApplied = std::min( ulApplied, iter.second.ulCurrentFocusSerial );
+
+	if ( ulApplied == s_ulAppliedFocusSerial )
+		return;
+
+	gamescope_xwayland_server_t *server = NULL;
+	for ( size_t i = 0; ( server = wlserver_get_xwayland_server( i ) ); i++ )
+		XFlush( server->ctx->dpy );
+	s_ulAppliedFocusSerial = ulApplied;
 }
 
 // The focus whose focusWindow is w, ignoring the other window roles.
@@ -9956,6 +9979,8 @@ steamcompmgr_main(int argc, char **argv)
 				hasRepaint = true;
 			}
 		}
+
+		publish_applied_focus_serial();
 
 		if ( g_bPendingFocusInfo.exchange( false ) )
 			DumpFocusInfo();
