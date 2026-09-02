@@ -9260,14 +9260,18 @@ static void relay_mangoapp_control()
 	if ( has_legacy_mangoapp_reader() )
 		return;
 
-	// One tag is enough to know these instances read a control type at all.
+	// One tag is enough to know these instances read a control type at all. A hidden one is unmapped, so look at every window.
 	bool bAnyTagged = false;
-	for ( auto &iter : g_VirtualConnectorFocuses )
+	gamescope_xwayland_server_t *server = NULL;
+	for (size_t i = 0; !bAnyTagged && (server = wlserver_get_xwayland_server(i)); i++)
 	{
-		if ( iter.second.externalOverlayWindow && iter.second.externalOverlayWindow->uMangoappMsgType )
+		for ( steamcompmgr_win_t *w = server->ctx->list; w; w = w->xwayland().next )
 		{
-			bAnyTagged = true;
-			break;
+			if ( w->uMangoappMsgType )
+			{
+				bAnyTagged = true;
+				break;
+			}
 		}
 	}
 	if ( !bAnyTagged )
