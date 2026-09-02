@@ -77,6 +77,8 @@ gamescope::ConVar<bool> cv_vr_nudge_to_visible( "vr_nudge_to_visible", false, ""
 gamescope::ConVar<bool> cv_vr_nudge_to_visible_per_connector( "vr_nudge_to_visible_per_connector", false, "" );
 gamescope::ConVar<bool> cv_vr_click_focus( "vr_click_focus", true, "Move keyboard focus to the overlay a click lands on, without waiting for SteamVR to grant it." );
 gamescope::ConVar<uint64_t> cv_vr_click_focus_hold( "vr_click_focus_hold", 100'000'000ul, "Longest time to hold a laser press while a keyboard focus change lands in X. 0 sends it at once. In nanoseconds." );
+gamescope::ConVar<bool> cv_vr_hover_focus( "vr_hover_focus", true, "Move keyboard focus to a game overlay the laser stays on, so a game holding the X pointer grab lets go of it. The controller stays where it was." );
+gamescope::ConVar<uint64_t> cv_vr_hover_focus_dwell( "vr_hover_focus_dwell", 250'000'000ul, "Time the laser has to stay on another game before keyboard focus follows it. In nanoseconds." );
 
 // Maximum interval between polling for VR events (normally paced by frame sync)
 gamescope::ConVar<uint32_t> cv_vr_poll_rate( "vr_poll_rate", 50ul, "Max time between input polls. In milliseconds." );
@@ -1187,6 +1189,51 @@ namespace gamescope
             nudge_steamcompmgr();
         }
 
+        // Game to game only, Steam's overlays are left to clicks since the laser crosses them constantly.
+        bool IsHoverFocusCandidate( COpenVRConnector *pConnector )
+        {
+            COpenVRConnector *pKeyboardConnector = m_pKeyboardFocusConnector.load();
+            return cv_vr_hover_focus && pConnector && pKeyboardConnector && pKeyboardConnector != pConnector &&
+                VirtualConnectorKeyIsGame( pConnector->GetVirtualConnectorKey() ) &&
+                VirtualConnectorKeyIsGame( pKeyboardConnector->GetVirtualConnectorKey() );
+        }
+
+        // Arms the dwell. The laser can sit still without further move events, so the dwell is checked every poll.
+        void UpdateHoverFocus( uint64_t ulOverlay, COpenVRConnector *pConnector )
+        {
+            if ( !IsHoverFocusCandidate( pConnector ) )
+            {
+                m_ulHoverOverlay = vr::k_ulOverlayHandleInvalid;
+                return;
+            }
+
+            if ( m_ulHoverOverlay != ulOverlay )
+            {
+                m_ulHoverOverlay = ulOverlay;
+                m_ulHoverSince = get_time_in_nanos();
+            }
+        }
+
+        void CheckHoverFocus()
+        {
+            if ( m_ulHoverOverlay == vr::k_ulOverlayHandleInvalid )
+                return;
+
+            if ( !IsHoverFocusCandidate( GetConnectorByOverlayHandle( m_ulHoverOverlay ) ) )
+            {
+                m_ulHoverOverlay = vr::k_ulOverlayHandleInvalid;
+                return;
+            }
+
+            if ( get_time_in_nanos() - m_ulHoverSince < cv_vr_hover_focus_dwell )
+                return;
+
+            // Keyboard only, the controller stays with the game picked on purpose.
+            openvr_log.debugf( "Laser stayed on %lx, moving keyboard focus to it", m_ulHoverOverlay );
+            SetKeyboardFocus( m_ulHoverOverlay, vr::k_EVRInputFocusEventFlags_OverlayShouldShowAffordanceForKeyboardInput );
+            m_ulHoverOverlay = vr::k_ulOverlayHandleInvalid;
+        }
+
         // A keyboard connector move has to land in X, and the game losing it
         // needs a moment to drop its pointer grab, before a press can go out.
         void ArmKeyboardFocusSettle()
@@ -1465,6 +1512,10 @@ namespace gamescope
 
                         TouchClickMode eMode = GetTouchClickMode();
 
+                        // A trackpad sweep is a drag, not a hover.
+                        if ( eMode != TouchClickModes::Trackpad )
+                            UpdateHoverFocus( hOverlay, pConnector );
+
                         if (eMode == TouchClickModes::Trackpad)
                         {
                             glm::vec2 vOldTrackpadPos = m_vScreenTrackpadPos;
@@ -1513,6 +1564,9 @@ namespace gamescope
 
                             SetMouseFocus( vr::k_ulOverlayHandleInvalid );
                         }
+
+                        if ( m_ulHoverOverlay == hOverlay )
+                            m_ulHoverOverlay = vr::k_ulOverlayHandleInvalid;
                     }
                     break;
 
@@ -1663,6 +1717,8 @@ namespace gamescope
                 }
             }
 
+            CheckHoverFocus();
+
             if (bPendingTouchMove)
             {
                 // Always warp a cursor, even if it's invisible, so we get hover events.
@@ -1728,6 +1784,10 @@ namespace gamescope
         int m_nKeyboardFocusGracePolls = 0;
         // The button of a held press that just went out, released a poll later.
         uint32_t m_uReleaseNextPoll = 0;
+
+        // The game overlay the laser is on and when it got there.
+        uint64_t m_ulHoverOverlay = vr::k_ulOverlayHandleInvalid;
+        uint64_t m_ulHoverSince = 0;
 
         // A laser press held back until the keyboard focus change has settled.
         struct
