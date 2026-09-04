@@ -1078,10 +1078,11 @@ static bool get_saved_mode(const char *description, saved_mode &mode_info)
 }
 
 /* Same identity extraction as CDRMConnector::ParseEDID. */
-static void parse_edid_identity(const di_edid *pEdid, char (&szMakePNP)[4], char (&szModel)[16])
+static void parse_edid_identity(const di_edid *pEdid, char (&szMakePNP)[4], char (&szModel)[16], char (&szDataString)[16])
 {
 	memset(szMakePNP, 0, sizeof(szMakePNP));
 	memset(szModel, 0, sizeof(szModel));
+	memset(szDataString, 0, sizeof(szDataString));
 
 	const di_edid_vendor_product *pProduct = di_edid_get_vendor_product(pEdid);
 	memcpy(szMakePNP, pProduct->manufacturer, 3);
@@ -1089,8 +1090,11 @@ static void parse_edid_identity(const di_edid *pEdid, char (&szMakePNP)[4], char
 	const di_edid_display_descriptor *const *pDescriptors = di_edid_get_display_descriptors(pEdid);
 	for (size_t i = 0; pDescriptors[i] != nullptr; i++)
 	{
-		if (di_edid_display_descriptor_get_tag(pDescriptors[i]) == DI_EDID_DISPLAY_DESCRIPTOR_PRODUCT_NAME)
+		const di_edid_display_descriptor_tag eTag = di_edid_display_descriptor_get_tag(pDescriptors[i]);
+		if (eTag == DI_EDID_DISPLAY_DESCRIPTOR_PRODUCT_NAME)
 			strncpy(szModel, di_edid_display_descriptor_get_string(pDescriptors[i]), sizeof(szModel) - 1);
+		else if (eTag == DI_EDID_DISPLAY_DESCRIPTOR_DATA_STRING)
+			strncpy(szDataString, di_edid_display_descriptor_get_string(pDescriptors[i]), sizeof(szDataString) - 1);
 	}
 }
 
@@ -1130,7 +1134,8 @@ static bool get_last_display_mode(saved_mode &mode_info)
 
 	char szMakePNP[4];
 	char szModel[16];
-	parse_edid_identity(pEdid, szMakePNP, szModel);
+	char szDataString[16];
+	parse_edid_identity(pEdid, szMakePNP, szModel, szDataString);
 
 	const char *pszMake = szMakePNP;
 	auto pnpIter = pnps.find(szMakePNP);
@@ -1172,6 +1177,147 @@ static bool get_last_display_mode(saved_mode &mode_info)
 
 namespace gamescope
 {
+	// Colorimetry and HDR info from the known-display entry, else from the EDID. Caller holds the script lock.
+	static void parse_edid_color_info( const di_edid *pEdid, const sol::table *pKnownDisplay, displaycolorimetry_t &colorimetry, BackendConnectorHDRInfo &hdrInfo )
+	{
+		bool bHasKnownColorimetry = false;
+		bool bHasKnownHDRInfo = false;
+		sol::optional<float> ofScriptMaxCLL, ofScriptMaxFALL, ofScriptMinCLL;
+
+		if ( pKnownDisplay )
+		{
+			sol::table tTable = *pKnownDisplay;
+
+			if ( sol::optional<sol::table> otColorimetry = tTable["colorimetry"] )
+			{
+				sol::table tColorimetry = *otColorimetry;
+
+				// TODO: Add a vec2 + colorimetry type?
+				sol::optional<sol::table> otR = tColorimetry["r"];
+				sol::optional<sol::table> otG = tColorimetry["g"];
+				sol::optional<sol::table> otB = tColorimetry["b"];
+				sol::optional<sol::table> otW = tColorimetry["w"];
+
+				if ( otR && otG && otB && otW )
+				{
+					colorimetry.primaries.r = TableToVec<glm::vec2>( *otR );
+					colorimetry.primaries.g = TableToVec<glm::vec2>( *otG );
+					colorimetry.primaries.b = TableToVec<glm::vec2>( *otB );
+					colorimetry.white = TableToVec<glm::vec2>( *otW );
+
+					bHasKnownColorimetry = true;
+				}
+			}
+
+			if ( sol::optional<sol::table> otHDRInfo = tTable["hdr"] )
+			{
+				hdrInfo.bExposeHDRSupport = otHDRInfo->get_or( "supported", false );
+				hdrInfo.eOutputEncodingEOTF = otHDRInfo->get_or( "eotf", EOTF_Gamma22 );
+				hdrInfo.bContentDrivenHDR = otHDRInfo->get_or( "content_driven", false );
+				hdrInfo.bSoftwareBacklight = otHDRInfo->get_or( "software_backlight", false );
+
+				ofScriptMaxCLL = (*otHDRInfo)["max_content_light_level"].get<sol::optional<float>>();
+				ofScriptMaxFALL = (*otHDRInfo)["max_frame_average_luminance"].get<sol::optional<float>>();
+				ofScriptMinCLL = (*otHDRInfo)["min_content_light_level"].get<sol::optional<float>>();
+
+				bHasKnownHDRInfo = true;
+			}
+		}
+
+		if ( !bHasKnownColorimetry )
+		{
+			// Steam Deck OLED has calibrated chromaticity coordinates in the EDID
+			// for each unit.
+			// Other external displays probably have this too.
+
+			const di_edid_chromaticity_coords *pChroma = di_edid_get_chromaticity_coords( pEdid );
+			if ( pChroma && pChroma->red_x != 0.0f )
+			{
+				drm_log.infof( "[colorimetry]: EDID with colorimetry detected. Using it" );
+				colorimetry = displaycolorimetry_t
+				{
+					.primaries = { { pChroma->red_x, pChroma->red_y }, { pChroma->green_x, pChroma->green_y }, { pChroma->blue_x, pChroma->blue_y } },
+					.white = { pChroma->white_x, pChroma->white_y },
+				};
+			}
+			else
+			{
+				// Assume 709 if we have no data at all.
+				colorimetry = displaycolorimetry_709;
+			}
+		}
+
+		/////////////////////
+		// Parse HDR stuff.
+		/////////////////////
+		if ( !bHasKnownHDRInfo || !ofScriptMaxCLL || !ofScriptMaxFALL || !ofScriptMinCLL )
+		{
+			const di_cta_hdr_static_metadata_block *pHDRStaticMetadata = nullptr;
+			const di_cta_colorimetry_block *pColorimetry = nullptr;
+
+			const di_edid_cta* pCTA = NULL;
+			const di_edid_ext *const *ppExts = di_edid_get_extensions( pEdid );
+			for ( ; *ppExts != nullptr; ppExts++ )
+			{
+				if ( ( pCTA = di_edid_ext_get_cta( *ppExts ) ) )
+					break;
+			}
+
+			if ( pCTA )
+			{
+				const di_cta_data_block *const *ppBlocks = di_edid_cta_get_data_blocks( pCTA );
+				for ( ; *ppBlocks != nullptr; ppBlocks++ )
+				{
+					if ( di_cta_data_block_get_tag( *ppBlocks ) == DI_CTA_DATA_BLOCK_HDR_STATIC_METADATA )
+					{
+						pHDRStaticMetadata = di_cta_data_block_get_hdr_static_metadata( *ppBlocks );
+						continue;
+					}
+
+					if ( di_cta_data_block_get_tag( *ppBlocks ) == DI_CTA_DATA_BLOCK_COLORIMETRY )
+					{
+						pColorimetry = di_cta_data_block_get_colorimetry( *ppBlocks );
+						continue;
+					}
+				}
+			}
+
+			if ( pColorimetry && pColorimetry->bt2020_rgb &&
+				 pHDRStaticMetadata && pHDRStaticMetadata->eotfs && pHDRStaticMetadata->eotfs->pq )
+			{
+				if ( !bHasKnownHDRInfo )
+				{
+					hdrInfo.bExposeHDRSupport = true;
+					hdrInfo.eOutputEncodingEOTF = EOTF_PQ;
+				}
+				hdrInfo.uMaxContentLightLevel =
+					pHDRStaticMetadata->desired_content_max_luminance
+					? nits_to_u16( pHDRStaticMetadata->desired_content_max_luminance )
+					: nits_to_u16( 1499.0f );
+				hdrInfo.uMaxFrameAverageLuminance =
+					pHDRStaticMetadata->desired_content_max_frame_avg_luminance
+					? nits_to_u16( pHDRStaticMetadata->desired_content_max_frame_avg_luminance )
+					: nits_to_u16( std::min( 799.f, nits_from_u16( hdrInfo.uMaxContentLightLevel ) ) );
+				hdrInfo.uMinContentLightLevel =
+					pHDRStaticMetadata->desired_content_min_luminance
+					? nits_to_u16_dark( pHDRStaticMetadata->desired_content_min_luminance )
+					: nits_to_u16_dark( 0.0f );
+			}
+			else if ( !bHasKnownHDRInfo )
+			{
+				hdrInfo.bExposeHDRSupport = false;
+			}
+		}
+
+		// Script values win over the EDID field by field.
+		if ( ofScriptMaxCLL )
+			hdrInfo.uMaxContentLightLevel = nits_to_u16( *ofScriptMaxCLL );
+		if ( ofScriptMaxFALL )
+			hdrInfo.uMaxFrameAverageLuminance = nits_to_u16( *ofScriptMaxFALL );
+		if ( ofScriptMinCLL )
+			hdrInfo.uMinContentLightLevel = nits_to_u16_dark( *ofScriptMinCLL );
+	}
+
 	// Stands in for a null current connector while headless.
 	class CDRMHeadlessConnector final : public CBaseBackendConnector
 	{
@@ -1196,10 +1342,15 @@ namespace gamescope
 		}
 		virtual bool SupportsHDR() const override
 		{
-			return false;
+			return m_HDRInfo.bExposeHDRSupport;
 		}
 		virtual bool IsHDRActive() const override
 		{
+			if ( m_HDRInfo.IsHDR10() )
+				return g_bOutputHDREnabled;
+			else if ( m_HDRInfo.IsHDRG22() )
+				return true;
+
 			return false;
 		}
 		virtual const BackendConnectorHDRInfo &GetHDRInfo() const override
@@ -1234,10 +1385,20 @@ namespace gamescope
 			displaycolorimetry_t *displayColorimetry, EOTF *displayEOTF,
 			displaycolorimetry_t *outputEncodingColorimetry, EOTF *outputEncodingEOTF ) const override
 		{
-			*displayColorimetry = displaycolorimetry_709;
+			*displayColorimetry = m_DisplayColorimetry;
 			*displayEOTF = EOTF_Gamma22;
-			*outputEncodingColorimetry = displaycolorimetry_709;
-			*outputEncodingEOTF = EOTF_Gamma22;
+
+			if ( bHDR10 && m_HDRInfo.IsHDR10() )
+			{
+				// For HDR10 output, expected content colorspace != native colorspace.
+				*outputEncodingColorimetry = displaycolorimetry_2020;
+				*outputEncodingEOTF = m_HDRInfo.eOutputEncodingEOTF;
+			}
+			else
+			{
+				*outputEncodingColorimetry = m_DisplayColorimetry;
+				*outputEncodingEOTF = EOTF_Gamma22;
+			}
 		}
 
 		virtual const char *GetName() const override
@@ -1258,16 +1419,56 @@ namespace gamescope
 			return 0;
 		}
 
-		void RebuildModes()
+		void RefreshState()
 		{
 			m_Modes = LoadModeListFile();
 			if ( m_Modes.empty() )
 				m_Modes.push_back( BackendMode{ (uint32_t)g_nOutputWidth, (uint32_t)g_nOutputHeight, (uint32_t)ConvertmHzToHz( g_nOutputRefresh ) } );
 			AppendSyntheticModes( m_Modes );
+
+			m_HDRInfo = BackendConnectorHDRInfo{};
+			m_DisplayColorimetry = displaycolorimetry_709;
+
+			const char *pszPath = GetPatchedEdidPath();
+			if ( !pszPath )
+				return;
+
+			FILE *pFile = fopen( pszPath, "rb" );
+			if ( !pFile )
+				return;
+
+			uint8_t edid[4096];
+			size_t ulSize = fread( edid, 1, sizeof( edid ), pFile );
+			fclose( pFile );
+			if ( !ulSize )
+				return;
+
+			di_info *pInfo = di_info_parse_edid( edid, ulSize );
+			if ( !pInfo )
+				return;
+			defer( di_info_destroy( pInfo ) );
+
+			const di_edid *pEdid = di_info_get_edid( pInfo );
+			const di_edid_vendor_product *pProduct = di_edid_get_vendor_product( pEdid );
+
+			char szMakePNP[4];
+			char szModel[16];
+			char szDataString[16];
+			parse_edid_identity( pEdid, szMakePNP, szModel, szDataString );
+
+			CScriptScopedLock script;
+			auto oKnownDisplay = script.Manager().Gamescope().Config.LookupDisplay( script, szMakePNP, pProduct->product, szModel, szDataString );
+			parse_edid_color_info( pEdid, oKnownDisplay ? &oKnownDisplay->second : nullptr, m_DisplayColorimetry, m_HDRInfo );
+			// No panel behind a stream, so no backlight to follow in software.
+			m_HDRInfo.bSoftwareBacklight = false;
+
+			if ( m_HDRInfo.bExposeHDRSupport )
+				drm_log.infof( "headless connector inheriting HDR from the last display: max %u nits", (uint32_t)m_HDRInfo.uMaxContentLightLevel );
 		}
 
 	private:
 		BackendConnectorHDRInfo m_HDRInfo{};
+		displaycolorimetry_t m_DisplayColorimetry = displaycolorimetry_709;
 		std::vector<BackendMode> m_Modes;
 	};
 }
@@ -1324,7 +1525,7 @@ static bool setup_best_connector(struct drm_t *drm, bool force, bool initial)
 		drm_log.infof("cannot find any connected connector!");
 		drm_unset_connector(drm);
 		drm_unset_mode(drm, force);
-		s_HeadlessConnector.RebuildModes();
+		s_HeadlessConnector.RefreshState();
 
 		// Steam keys saved modes by the description, so get_last_display_mode reads this name back.
 		const struct wlserver_output_info wlserver_output_info = {
@@ -2576,10 +2777,6 @@ namespace gamescope
 
 		drm_log.infof("Connector %s -> %s - %s", m_Mutable.szName, m_Mutable.szMakePNP, m_Mutable.szModel );
 
-		bool bHasKnownColorimetry = false;
-		bool bHasKnownHDRInfo = false;
-		sol::optional<float> ofScriptMaxCLL, ofScriptMaxFALL, ofScriptMinCLL;
-
 		m_Mutable.ValidDynamicRefreshRates.clear();
 		m_Mutable.fnDynamicModeGenerator = nullptr;
 		{
@@ -2648,41 +2845,6 @@ namespace gamescope
 						return outMode;
 					};
 				}
-
-				if ( sol::optional<sol::table> otColorimetry = tTable["colorimetry"] )
-				{
-					sol::table tColorimetry = *otColorimetry;
-
-					// TODO: Add a vec2 + colorimetry type?
-					sol::optional<sol::table> otR = tColorimetry["r"];
-					sol::optional<sol::table> otG = tColorimetry["g"];
-					sol::optional<sol::table> otB = tColorimetry["b"];
-					sol::optional<sol::table> otW = tColorimetry["w"];
-
-					if ( otR && otG && otB && otW )
-					{
-						m_Mutable.DisplayColorimetry.primaries.r = TableToVec<glm::vec2>( *otR );
-						m_Mutable.DisplayColorimetry.primaries.g = TableToVec<glm::vec2>( *otG );
-						m_Mutable.DisplayColorimetry.primaries.b = TableToVec<glm::vec2>( *otB );
-						m_Mutable.DisplayColorimetry.white = TableToVec<glm::vec2>( *otW );
-
-						bHasKnownColorimetry = true;
-					}
-				}
-
-				if ( sol::optional<sol::table> otHDRInfo = tTable["hdr"] )
-				{
-					m_Mutable.HDR.bExposeHDRSupport = otHDRInfo->get_or( "supported", false );
-					m_Mutable.HDR.eOutputEncodingEOTF = otHDRInfo->get_or( "eotf", EOTF_Gamma22 );
-					m_Mutable.HDR.bContentDrivenHDR = otHDRInfo->get_or( "content_driven", false );
-					m_Mutable.HDR.bSoftwareBacklight = otHDRInfo->get_or( "software_backlight", false );
-
-					ofScriptMaxCLL = (*otHDRInfo)["max_content_light_level"].get<sol::optional<float>>();
-					ofScriptMaxFALL = (*otHDRInfo)["max_frame_average_luminance"].get<sol::optional<float>>();
-					ofScriptMinCLL = (*otHDRInfo)["min_content_light_level"].get<sol::optional<float>>();
-
-					bHasKnownHDRInfo = true;
-				}
 			}
 			else
 			{
@@ -2712,105 +2874,14 @@ namespace gamescope
 					}
 				}
 			}
-		}
 
-		if ( !bHasKnownColorimetry )
-		{
-			// Steam Deck OLED has calibrated chromaticity coordinates in the EDID
-			// for each unit.
-			// Other external displays probably have this too.
-
-			const di_edid_chromaticity_coords *pChroma = di_edid_get_chromaticity_coords( pEdid );
-			if ( pChroma && pChroma->red_x != 0.0f )
-			{
-				drm_log.infof( "[colorimetry]: EDID with colorimetry detected. Using it" );
-				m_Mutable.DisplayColorimetry = displaycolorimetry_t
-				{
-					.primaries = { { pChroma->red_x, pChroma->red_y }, { pChroma->green_x, pChroma->green_y }, { pChroma->blue_x, pChroma->blue_y } },
-					.white = { pChroma->white_x, pChroma->white_y },
-				};
-			}
-			else
-			{
-				// Assume 709 if we have no data at all.
-				m_Mutable.DisplayColorimetry = displaycolorimetry_709;
-			}
+			parse_edid_color_info( pEdid, oKnownDisplay ? &oKnownDisplay->second : nullptr, m_Mutable.DisplayColorimetry, m_Mutable.HDR );
 		}
 
 		drm_log.infof( "[colorimetry]: r %f %f", m_Mutable.DisplayColorimetry.primaries.r.x, m_Mutable.DisplayColorimetry.primaries.r.y );
 		drm_log.infof( "[colorimetry]: g %f %f", m_Mutable.DisplayColorimetry.primaries.g.x, m_Mutable.DisplayColorimetry.primaries.g.y );
 		drm_log.infof( "[colorimetry]: b %f %f", m_Mutable.DisplayColorimetry.primaries.b.x, m_Mutable.DisplayColorimetry.primaries.b.y );
 		drm_log.infof( "[colorimetry]: w %f %f", m_Mutable.DisplayColorimetry.white.x, m_Mutable.DisplayColorimetry.white.y );
-
-		/////////////////////
-		// Parse HDR stuff.
-		/////////////////////
-		if ( !bHasKnownHDRInfo || !ofScriptMaxCLL || !ofScriptMaxFALL || !ofScriptMinCLL )
-		{
-			const di_cta_hdr_static_metadata_block *pHDRStaticMetadata = nullptr;
-			const di_cta_colorimetry_block *pColorimetry = nullptr;
-
-			const di_edid_cta* pCTA = NULL;
-			const di_edid_ext *const *ppExts = di_edid_get_extensions( pEdid );
-			for ( ; *ppExts != nullptr; ppExts++ )
-			{
-				if ( ( pCTA = di_edid_ext_get_cta( *ppExts ) ) )
-					break;
-			}
-
-			if ( pCTA )
-			{
-				const di_cta_data_block *const *ppBlocks = di_edid_cta_get_data_blocks( pCTA );
-				for ( ; *ppBlocks != nullptr; ppBlocks++ )
-				{
-					if ( di_cta_data_block_get_tag( *ppBlocks ) == DI_CTA_DATA_BLOCK_HDR_STATIC_METADATA )
-					{
-						pHDRStaticMetadata = di_cta_data_block_get_hdr_static_metadata( *ppBlocks );
-						continue;
-					}
-
-					if ( di_cta_data_block_get_tag( *ppBlocks ) == DI_CTA_DATA_BLOCK_COLORIMETRY )
-					{
-						pColorimetry = di_cta_data_block_get_colorimetry( *ppBlocks );
-						continue;
-					}
-				}
-			}
-
-			if ( pColorimetry && pColorimetry->bt2020_rgb &&
-				 pHDRStaticMetadata && pHDRStaticMetadata->eotfs && pHDRStaticMetadata->eotfs->pq )
-			{
-				if ( !bHasKnownHDRInfo )
-				{
-					m_Mutable.HDR.bExposeHDRSupport = true;
-					m_Mutable.HDR.eOutputEncodingEOTF = EOTF_PQ;
-				}
-				m_Mutable.HDR.uMaxContentLightLevel =
-					pHDRStaticMetadata->desired_content_max_luminance
-					? nits_to_u16( pHDRStaticMetadata->desired_content_max_luminance )
-					: nits_to_u16( 1499.0f );
-				m_Mutable.HDR.uMaxFrameAverageLuminance =
-					pHDRStaticMetadata->desired_content_max_frame_avg_luminance
-					? nits_to_u16( pHDRStaticMetadata->desired_content_max_frame_avg_luminance )
-					: nits_to_u16( std::min( 799.f, nits_from_u16( m_Mutable.HDR.uMaxContentLightLevel ) ) );
-				m_Mutable.HDR.uMinContentLightLevel =
-					pHDRStaticMetadata->desired_content_min_luminance
-					? nits_to_u16_dark( pHDRStaticMetadata->desired_content_min_luminance )
-					: nits_to_u16_dark( 0.0f );
-			}
-			else if ( !bHasKnownHDRInfo )
-			{
-				m_Mutable.HDR.bExposeHDRSupport = false;
-			}
-		}
-
-		// Script values win over the EDID field by field.
-		if ( ofScriptMaxCLL )
-			m_Mutable.HDR.uMaxContentLightLevel = nits_to_u16( *ofScriptMaxCLL );
-		if ( ofScriptMaxFALL )
-			m_Mutable.HDR.uMaxFrameAverageLuminance = nits_to_u16( *ofScriptMaxFALL );
-		if ( ofScriptMinCLL )
-			m_Mutable.HDR.uMinContentLightLevel = nits_to_u16_dark( *ofScriptMinCLL );
 
 		// Generate a default HDR10 infoframe.
 		if ( m_Mutable.HDR.IsHDR10() )
