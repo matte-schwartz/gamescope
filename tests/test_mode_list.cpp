@@ -54,3 +54,37 @@ TEST_CASE("Mode list parse rejects out-of-range values", "[mode_list]") {
 	REQUIRE( parsed[0].uHeight == 1080 );
 	REQUIRE( parsed[0].uRefresh == 60 );
 }
+
+TEST_CASE("Synthetic modes skip entries the display provides", "[modelist]") {
+	std::vector<BackendMode> modes = {
+		{ 5120, 2160, 165 },
+		{ 5120, 2160, 120 },
+		{ 3440, 1440, 144 },
+		{ 1920, 1080, 60 },
+	};
+
+	AppendSyntheticModes( modes );
+
+	// 10 resolutions x 4 refreshes, minus the three exact pairs already present.
+	REQUIRE( modes.size() == 4 + 40 - 3 );
+
+	// The display's own modes stay first and untouched.
+	REQUIRE( modes[0].uWidth == 5120 );
+	REQUIRE( modes[0].uRefresh == 165 );
+
+	int nCount5120x2160at120 = 0;
+	int nCount3440x1440at144 = 0;
+	int nCount5120x2160at90 = 0;
+	for ( const BackendMode &mode : modes )
+	{
+		if ( mode.uWidth == 5120 && mode.uHeight == 2160 && mode.uRefresh == 120 )
+			nCount5120x2160at120++;
+		if ( mode.uWidth == 3440 && mode.uHeight == 1440 && mode.uRefresh == 144 )
+			nCount3440x1440at144++;
+		if ( mode.uWidth == 5120 && mode.uHeight == 2160 && mode.uRefresh == 90 )
+			nCount5120x2160at90++;
+	}
+	REQUIRE( nCount5120x2160at120 == 1 );
+	REQUIRE( nCount3440x1440at144 == 1 );
+	REQUIRE( nCount5120x2160at90 == 1 );
+}

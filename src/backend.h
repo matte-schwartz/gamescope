@@ -205,6 +205,9 @@ namespace gamescope
 
         virtual uint64_t GetVirtualConnectorKey() const = 0;
 
+        // A stand-in connector with no display behind it, e.g. the DRM headless virtual screen.
+        virtual bool IsHeadless() const { return false; }
+
         virtual INestedHints *GetNestedHints() = 0;
 
         virtual void SetProperty( ConnectorProperty eProperty, std::any value ) = 0;

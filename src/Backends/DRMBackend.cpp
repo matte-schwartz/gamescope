@@ -597,7 +597,7 @@ static LogScope liftoff_log_scope( "liftoff" );
 
 static std::unordered_map< std::string, std::string > pnps = {};
 
-static void drm_unset_mode( struct drm_t *drm );
+static void drm_unset_mode( struct drm_t *drm, bool force );
 static void drm_unset_connector( struct drm_t *drm );
 
 static constexpr uint32_t s_kSteamDeckLCDRates[] =
@@ -1094,9 +1094,19 @@ static void parse_edid_identity(const di_edid *pEdid, char (&szMakePNP)[4], char
 	}
 }
 
+static constexpr const char *k_pszVirtualScreenName = "Virtual screen";
+
 /* Resolve a mode from the display we last drove, identified by the persisted EDID. */
 static bool get_last_display_mode(saved_mode &mode_info)
 {
+	// A mode picked while headless is saved under the virtual screen's own name.
+	if (get_saved_mode(k_pszVirtualScreenName, mode_info) && mode_info.width > 0 && mode_info.height > 0 && mode_info.refresh > 0)
+	{
+		drm_log.infof("using saved mode %dx%d@%d of the virtual screen",
+			mode_info.width, mode_info.height, mode_info.refresh);
+		return true;
+	}
+
 	const char *pszPath = gamescope::GetPatchedEdidPath();
 	if (!pszPath)
 		return false;
@@ -1160,6 +1170,110 @@ static bool get_last_display_mode(saved_mode &mode_info)
 	return false;
 }
 
+namespace gamescope
+{
+	// Stands in for a null current connector while headless.
+	class CDRMHeadlessConnector final : public CBaseBackendConnector
+	{
+	public:
+		virtual bool IsHeadless() const override
+		{
+			return true;
+		}
+		// The null-connector path this replaces reports id 0, so keep that instead of an auto-assigned id.
+		virtual uint64_t GetConnectorID() const override
+		{
+			return 0;
+		}
+
+		virtual GamescopeScreenType GetScreenType() const override
+		{
+			return GAMESCOPE_SCREEN_TYPE_EXTERNAL;
+		}
+		virtual GamescopePanelOrientation GetCurrentOrientation() const override
+		{
+			return GAMESCOPE_PANEL_ORIENTATION_0;
+		}
+		virtual bool SupportsHDR() const override
+		{
+			return false;
+		}
+		virtual bool IsHDRActive() const override
+		{
+			return false;
+		}
+		virtual const BackendConnectorHDRInfo &GetHDRInfo() const override
+		{
+			return m_HDRInfo;
+		}
+		virtual bool IsVRRActive() const override
+		{
+			return false;
+		}
+		virtual std::span<const BackendMode> GetModes() const override
+		{
+			return m_Modes;
+		}
+
+		virtual bool SupportsVRR() const override
+		{
+			return false;
+		}
+
+		virtual std::span<const uint8_t> GetRawEDID() const override
+		{
+			return std::span<const uint8_t>{};
+		}
+		virtual std::span<const uint32_t> GetValidDynamicRefreshRates() const override
+		{
+			return std::span<const uint32_t>{};
+		}
+
+		virtual void GetNativeColorimetry(
+			bool bHDR10,
+			displaycolorimetry_t *displayColorimetry, EOTF *displayEOTF,
+			displaycolorimetry_t *outputEncodingColorimetry, EOTF *outputEncodingEOTF ) const override
+		{
+			*displayColorimetry = displaycolorimetry_709;
+			*displayEOTF = EOTF_Gamma22;
+			*outputEncodingColorimetry = displaycolorimetry_709;
+			*outputEncodingEOTF = EOTF_Gamma22;
+		}
+
+		virtual const char *GetName() const override
+		{
+			return "Headless";
+		}
+		virtual const char *GetMake() const override
+		{
+			return "Gamescope";
+		}
+		virtual const char *GetModel() const override
+		{
+			return k_pszVirtualScreenName;
+		}
+
+		virtual int Present( const FrameInfo_t *pFrameInfo, bool bAsync ) override
+		{
+			return 0;
+		}
+
+		void RebuildModes()
+		{
+			m_Modes = LoadModeListFile();
+			if ( m_Modes.empty() )
+				m_Modes.push_back( BackendMode{ (uint32_t)g_nOutputWidth, (uint32_t)g_nOutputHeight, (uint32_t)ConvertmHzToHz( g_nOutputRefresh ) } );
+			AppendSyntheticModes( m_Modes );
+		}
+
+	private:
+		BackendConnectorHDRInfo m_HDRInfo{};
+		std::vector<BackendMode> m_Modes;
+	};
+}
+
+static gamescope::CDRMHeadlessConnector s_HeadlessConnector;
+
 static GamescopeBroadcastRGBMode_t s_ExternalBroadcastRGBMode = GAMESCOPE_BROADCAST_RGB_MODE_AUTOMATIC;
 
 static bool setup_best_connector(struct drm_t *drm, bool force, bool initial)
@@ -1209,13 +1323,17 @@ static bool setup_best_connector(struct drm_t *drm, bool force, bool initial)
 	if (best == nullptr) {
 		drm_log.infof("cannot find any connected connector!");
 		drm_unset_connector(drm);
-		drm_unset_mode(drm);
+		drm_unset_mode(drm, force);
+		s_HeadlessConnector.RebuildModes();
+
+		// Steam keys saved modes by the description, so get_last_display_mode reads this name back.
 		const struct wlserver_output_info wlserver_output_info = {
-			.description = "Virtual screen",
+			.description = k_pszVirtualScreenName,
 		};
 		wlserver_lock();
 		wlserver_set_output_info(&wlserver_output_info);
 		wlserver_unlock();
+		update_connector_display_info_wl( drm );
 		return true;
 	}
 
@@ -3441,7 +3559,7 @@ bool drm_update_color_mgmt(struct drm_t *drm)
 
 int g_nDynamicRefreshHz = 0;
 
-static void drm_unset_mode( struct drm_t *drm )
+static void drm_unset_mode( struct drm_t *drm, bool force )
 {
 	drm->pending.mode_id = 0;
 	drm->needs_modeset = true;
@@ -3452,9 +3570,9 @@ static void drm_unset_mode( struct drm_t *drm )
 		g_nOutputHeight = drm->preferred_height;
 		g_nOutputRefresh = drm->preferred_refresh;
 	}
-	else if ( g_nOutputWidth == 0 || g_nOutputHeight == 0 )
+	else if ( force )
 	{
-		// Cold headless start, size the virtual screen off the display we last drove.
+		// Cold start, or Steam picked a mode while headless.
 		saved_mode mode_info{};
 		if ( get_last_display_mode( mode_info ) )
 		{
@@ -4109,13 +4227,16 @@ namespace gamescope
 
 		virtual IBackendConnector *GetCurrentConnector() override
 		{
-			return g_DRM.pConnector;
+			if ( g_DRM.pConnector )
+				return g_DRM.pConnector;
+
+			return &s_HeadlessConnector;
 		}
 
 		virtual IBackendConnector *GetConnector( GamescopeScreenType eScreenType ) override
 		{
-			if ( GetCurrentConnector() && GetCurrentConnector()->GetScreenType() == eScreenType )
-				return GetCurrentConnector();
+			if ( g_DRM.pConnector && g_DRM.pConnector->GetScreenType() == eScreenType )
+				return g_DRM.pConnector;
 
 			if ( eScreenType == GAMESCOPE_SCREEN_TYPE_INTERNAL )
 			{
@@ -4194,11 +4315,11 @@ namespace gamescope
 
 		virtual void HackUpdatePatchedEdid() override
 		{
-			if ( !GetCurrentConnector() )
+			if ( !g_DRM.pConnector )
 				return;
 
-			WritePatchedEdid( GetCurrentConnector()->GetRawEDID(), GetCurrentConnector()->GetHDRInfo(), g_bRotated );
-			WriteModeListFile( GetCurrentConnector()->GetModes() );
+			WritePatchedEdid( g_DRM.pConnector->GetRawEDID(), g_DRM.pConnector->GetHDRInfo(), g_bRotated );
+			WriteModeListFile( g_DRM.pConnector->GetModes() );
 		}
 
 	protected:
@@ -4246,14 +4367,14 @@ namespace gamescope
 				drm->m_QueuedFbIds.swap( drm->m_FbIdsInRequest );
 			}
 
-			GetCurrentConnector()->PresentationFeedback().m_uQueuedPresents++;
+			g_DRM.pConnector->PresentationFeedback().m_uQueuedPresents++;
 
 			uint32_t uCurrentPresentCtx = m_uNextPresentCtx;
 			m_uNextPresentCtx = ( m_uNextPresentCtx + 1 ) % 3;
-			m_PresentCtxs[uCurrentPresentCtx].ulPendingFlipCount = GetCurrentConnector()->PresentationFeedback().m_uQueuedPresents;
+			m_PresentCtxs[uCurrentPresentCtx].ulPendingFlipCount = g_DRM.pConnector->PresentationFeedback().m_uQueuedPresents;
 
-			drm_log.debugf("flip commit %" PRIu64, (uint64_t)GetCurrentConnector()->PresentationFeedback().m_uQueuedPresents);
-			gpuvis_trace_printf( "flip commit %" PRIu64, (uint64_t)GetCurrentConnector()->PresentationFeedback().m_uQueuedPresents );
+			drm_log.debugf("flip commit %" PRIu64, (uint64_t)g_DRM.pConnector->PresentationFeedback().m_uQueuedPresents);
+			gpuvis_trace_printf( "flip commit %" PRIu64, (uint64_t)g_DRM.pConnector->PresentationFeedback().m_uQueuedPresents );
 
 			ret = drmModeAtomicCommit(drm->fd, drm->req, drm->flags, &m_PresentCtxs[uCurrentPresentCtx] );
 			if ( ret != 0 )
@@ -4279,7 +4400,7 @@ namespace gamescope
 				// Clear our refs.
 				drm->m_FbIdsInRequest.clear();
 
-				GetCurrentConnector()->PresentationFeedback().m_uQueuedPresents--;
+				g_DRM.pConnector->PresentationFeedback().m_uQueuedPresents--;
 
 				if ( isPageFlip )
 					drm->uPendingFlipCount--;
