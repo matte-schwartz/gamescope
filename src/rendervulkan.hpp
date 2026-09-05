@@ -1012,6 +1012,8 @@ public:
 
 	void AddDependency( std::shared_ptr<VulkanTimelineSemaphore_t> pTimelineSemaphore, uint64_t ulPoint );
 	void AddSignal( std::shared_ptr<VulkanTimelineSemaphore_t> pTimelineSemaphore, uint64_t ulPoint );
+	// Signalled once the GPU is done with the work, like the texture refs.
+	void AddReleasePoint( std::shared_ptr<gamescope::CReleaseTimelinePoint> pReleasePoint );
 
 	const std::vector<VulkanTimelinePoint_t> &GetExternalDependencies() const { return m_ExternalDependencies; }
 	const std::vector<VulkanTimelinePoint_t> &GetExternalSignals() const { return m_ExternalSignals; }
@@ -1028,6 +1030,7 @@ private:
 
 	// Per Use State
 	std::vector<gamescope::Rc<CVulkanTexture>> m_textureRefs;
+	std::vector<std::shared_ptr<gamescope::CReleaseTimelinePoint>> m_releasePoints;
 	std::vector<uint32_t> m_usedDescriptorSets;
 	std::unordered_map<CVulkanTexture *, TextureState> m_textureState;
 
