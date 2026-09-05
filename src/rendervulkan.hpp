@@ -180,6 +180,7 @@ public:
 	inline gamescope::IBackendFb* GetBackendFb() { return m_pBackendFb.get(); }
 	inline uint8_t *mappedData() { return m_pMappedData; }
 	inline VkFormat format() const { return m_format; }
+	inline bool transferSrc() const { return m_bTransferSrc; }
 	inline const struct wlr_dmabuf_attributes& dmabuf() { return m_dmabuf; }
 	inline VkImage vkImage() { return m_vkImage; }
 	inline bool outputImage() { return m_bOutputImage; }
@@ -210,6 +211,7 @@ public:
 private:
 	bool m_bInitialized = false;
 	bool m_bExternal = false;
+	bool m_bTransferSrc = false;
 	bool m_bOutputImage = false;
 
 	uint32_t m_drmFormat = DRM_FORMAT_INVALID;
@@ -995,6 +997,7 @@ public:
 	void bindPipeline(VkPipeline pipeline);
 	void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1);
 	void copyImage(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst);
+	void copyImageRegion(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst, int32_t x, int32_t y, uint32_t width, uint32_t height);
 	void copyBufferToImage(VkBuffer buffer, VkDeviceSize offset, uint32_t stride, gamescope::Rc<CVulkanTexture> dst);
 
 
