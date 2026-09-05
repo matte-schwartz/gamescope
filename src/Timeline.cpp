@@ -143,7 +143,7 @@ namespace gamescope
             &m_ulPoint,
             1,
             lTimeout,
-            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
+            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
             nullptr );
 
         if ( nRet < 0 )
