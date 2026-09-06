@@ -560,7 +560,7 @@ namespace gamescope
         xkb_keymap *m_pXkbKeymap = nullptr;
 
         uint32_t m_uKeyModifiers = 0;
-        uint32_t m_uModMask[ GAMESCOPE_WAYLAND_MOD_COUNT ];
+        uint32_t m_uModMask[ GAMESCOPE_WAYLAND_MOD_COUNT ] = {};
 
         double m_flScrollAccum[2] = { 0.0, 0.0 };
         uint32_t m_uAxisSource = WL_POINTER_AXIS_SOURCE_WHEEL;
@@ -3230,7 +3230,10 @@ namespace gamescope
         m_pXkbKeymap = pKeymap;
 
         for ( uint32_t i = 0; i < GAMESCOPE_WAYLAND_MOD_COUNT; i++ )
-            m_uModMask[ i ] = 1u << xkb_keymap_mod_get_index( m_pXkbKeymap, WaylandModifierToXkbModifierName( ( WaylandModifierIndex ) i ) );
+        {
+            xkb_mod_index_t uIndex = xkb_keymap_mod_get_index( m_pXkbKeymap, WaylandModifierToXkbModifierName( ( WaylandModifierIndex ) i ) );
+            m_uModMask[ i ] = uIndex < 32 ? 1u << uIndex : 0;
+        }
     }
     void CWaylandInputThread::Wayland_Keyboard_Enter( wl_keyboard *pKeyboard, uint32_t uSerial, wl_surface *pSurface, wl_array *pKeys )
     {
