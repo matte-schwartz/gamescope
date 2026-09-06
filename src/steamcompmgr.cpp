@@ -4592,15 +4592,9 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 
 				if ( queryWindow->oulTargetVROverlay && *queryWindow->oulTargetVROverlay == ulFocusedMouseOverlayVR )
 				{
-					// We don't want to do any mouse input for target VR overlays right now.
-					// SteamWebHelper is handling this.
-
+					// Fall back to the forwarded view when this context has no app input target.
 					if ( !inputFocus )
 						inputFocus = queryWindow;
-
-					// No support for overrides with this VR path!
-					ctx->focus.overrideWindow = nullptr;
-					ctx->focus.overrideWindowMouse = nullptr;
 				}
 			}
 		}
@@ -5059,7 +5053,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 		focus_log.debugf( "Current focus VR overlays: keyboard 0x%lx | mouse 0x%lx", ulFocusedKeyboardOverlayVR, ulFocusedMouseOverlayVR );
 
-		if ( ulFocusedKeyboardOverlayVR || ulFocusedMouseOverlayVR )
+		if ( ulFocusedKeyboardOverlayVR )
 		{
 			for ( steamcompmgr_win_t *queryWindow = root_ctx->list; queryWindow; queryWindow = queryWindow->xwayland().next )
 			{
@@ -5067,18 +5061,6 @@ determine_and_apply_focus( global_focus_t *pFocus )
 				{
 					focus_log.debugf( "[WL GLOBAL] Overriding keyboard focus window with VR forwarder overlay! Overlay: 0x%lx XWindow: 0x%x Title: %s", ulFocusedKeyboardOverlayVR, queryWindow->id(), queryWindow->debug_name() );
 					pFocus->keyboardFocusWindow = queryWindow;
-
-					pFocus->overrideWindow = nullptr;
-					pFocus->overrideUnderlayWindow = nullptr;
-					pFocus->decorationWindows.clear();
-				}
-
-				if ( queryWindow->oulTargetVROverlay && *queryWindow->oulTargetVROverlay == ulFocusedMouseOverlayVR )
-				{
-					// We don't want to do any mouse input for target VR overlays right now.
-					// SteamWebHelper is handling this.
-
-					//pFocus->inputFocusWindow = queryWindow;
 
 					pFocus->overrideWindow = nullptr;
 					pFocus->overrideUnderlayWindow = nullptr;
