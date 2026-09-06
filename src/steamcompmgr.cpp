@@ -6162,7 +6162,9 @@ destroy_win(xwayland_ctx_t *ctx, Window id, bool gone, bool fade)
 	}
 
 #if HAVE_PIPEWIRE
-	// The pipewire repick dereferences these when carrying the underlay.
+	// The pipewire repick can retain the old focus when no candidates remain.
+	if (x11_win(s_PipewireFocus.focusWindow) == id)
+		s_PipewireFocus.focusWindow = nullptr;
 	if (x11_win(s_PipewireFocus.overrideWindow) == id)
 		s_PipewireFocus.overrideWindow = nullptr;
 	if (x11_win(s_PipewireFocus.overrideUnderlayWindow) == id)
@@ -7487,6 +7489,11 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 			}
 
 #if HAVE_PIPEWIRE
+			if (s_PipewireFocus.focusWindow &&
+				s_PipewireFocus.focusWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
+				s_PipewireFocus.focusWindow->xwayland().ctx == server->ctx.get())
+				s_PipewireFocus.focusWindow = nullptr;
+
 			if (s_PipewireFocus.overrideWindow &&
 				s_PipewireFocus.overrideWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
 				s_PipewireFocus.overrideWindow->xwayland().ctx == server->ctx.get())
@@ -9084,6 +9091,10 @@ void steamcompmgr_check_xdg(bool vblank, uint64_t vblank_idx)
 			if (pFocus->keyboardFocusWindow && pFocus->keyboardFocusWindow->type == steamcompmgr_win_type_t::XDG)
 				pFocus->keyboardFocusWindow = nullptr;
 		}
+#if HAVE_PIPEWIRE
+		if (s_PipewireFocus.focusWindow && s_PipewireFocus.focusWindow->type == steamcompmgr_win_type_t::XDG)
+			s_PipewireFocus.focusWindow = nullptr;
+#endif
 		g_steamcompmgr_xdg_wins = wlserver_get_xdg_shell_windows();
 		MakeFocusDirty();
 	}
