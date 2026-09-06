@@ -12,10 +12,12 @@
 #include "Utils/TempFiles.h"
 
 #include <cstring>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <csignal>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <poll.h>
 #include <linux/input-event-codes.h>
 #include <xkbcommon/xkbcommon.h>
@@ -533,6 +535,8 @@ namespace gamescope
     private:
 
         void HandleKey( uint32_t uKey, bool bPressed );
+        void ReleaseKeyboard();
+        void ResetKeymap();
 
         CWaylandBackend *m_pBackend = nullptr;
 
@@ -556,8 +560,7 @@ namespace gamescope
 
         uint32_t m_uFakeTimestamp = 0;
 
-        xkb_context *m_pXkbContext = nullptr;
-        xkb_keymap *m_pXkbKeymap = nullptr;
+        std::string m_sKeymap;
 
         uint32_t m_uKeyModifiers = 0;
         uint32_t m_uModMask[ GAMESCOPE_WAYLAND_MOD_COUNT ] = {};
@@ -2772,17 +2775,14 @@ namespace gamescope
 
         m_Waiter.Shutdown();
         m_Thread.join();
+        wlserver_lock();
+        wlserver_host_keyboard_finish();
+        wlserver_unlock();
     }
 
     bool CWaylandInputThread::Init( CWaylandBackend *pBackend )
     {
         m_pBackend = pBackend;
-
-        if ( !( m_pXkbContext = xkb_context_new( XKB_CONTEXT_NO_FLAGS ) ) )
-        {
-            xdg_log.errorf( "Couldn't create xkb context." );
-            return false;
-        }
 
         if ( !( m_pQueue = wl_display_create_queue( m_pBackend->GetDisplay() ) ) )
         {
@@ -2803,6 +2803,10 @@ namespace gamescope
             return false;
         }
         wl_registry_add_listener( pRegistry, &s_RegistryListener, this );
+
+        wlserver_lock();
+        wlserver_host_keyboard_init();
+        wlserver_unlock();
 
         wl_display_roundtrip_queue( pBackend->GetDisplay(), m_pQueue );
         wl_display_roundtrip_queue( pBackend->GetDisplay(), m_pQueue );
@@ -3013,7 +3017,7 @@ namespace gamescope
         }
 
         wlserver_lock();
-        wlserver_key( uKey, bPressed, ++m_uFakeTimestamp );
+        wlserver_host_keyboard_key( uKey, bPressed, ++m_uFakeTimestamp );
         wlserver_unlock();
     }
 
@@ -3054,8 +3058,10 @@ namespace gamescope
         {
             if ( m_pKeyboard )
             {
+                ReleaseKeyboard();
                 wl_keyboard_release( m_pKeyboard );
                 m_pKeyboard = nullptr;
+                ResetKeymap();
             }
             else
             {
@@ -3204,13 +3210,23 @@ namespace gamescope
 
     void CWaylandInputThread::Wayland_Keyboard_Keymap( wl_keyboard *pKeyboard, uint32_t uFormat, int32_t nFd, uint32_t uSize )
     {
-        // We are not doing much with the keymap, we pass keycodes thru.
-        // Ideally we'd use this to influence our keymap to clients, eg. x server.
-
         defer( close( nFd ) );
-        if ( uFormat != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 )
-		return;
+        bool bAccepted = false;
+        defer( if ( !bAccepted ) ResetKeymap() );
+        if ( uFormat != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 || uSize == 0 )
+            return;
 
+        struct stat st;
+        if ( fstat( nFd, &st ) < 0 )
+        {
+            xdg_log.errorf_errno( "Failed to stat host keymap fd" );
+            return;
+        }
+        if ( st.st_size < uSize )
+        {
+            xdg_log.errorf( "Host keymap fd is smaller than its advertised size" );
+            return;
+        }
         char *pMap = (char *)mmap( nullptr, uSize, PROT_READ, MAP_PRIVATE, nFd, 0 );
         if ( !pMap || pMap == MAP_FAILED )
         {
@@ -3219,21 +3235,52 @@ namespace gamescope
         }
         defer( munmap( pMap, uSize ) );
 
-        xkb_keymap *pKeymap = xkb_keymap_new_from_string( m_pXkbContext, pMap, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS );
+        if ( pMap[ uSize - 1 ] != '\0' )
+        {
+            xdg_log.errorf( "Host keymap is not NUL-terminated" );
+            return;
+        }
+        std::string_view sKeymap{ pMap, uSize - 1 };
+        if ( !m_sKeymap.empty() && sKeymap == m_sKeymap )
+        {
+            bAccepted = true;
+            return;
+        }
+
+        // Drop the context's reference before transferring the entire object graph.
+        xkb_context *pContext = xkb_context_new( XKB_CONTEXT_NO_ENVIRONMENT_NAMES );
+        if ( !pContext )
+            return;
+        gamescope::XkbKeymap pKeymap{ xkb_keymap_new_from_buffer( pContext, pMap, uSize - 1,
+            XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS ) };
+        xkb_context_unref( pContext );
         if ( !pKeymap )
         {
             xdg_log.errorf( "Failed to create xkb_keymap" );
             return;
         }
 
-        xkb_keymap_unref( m_pXkbKeymap );
-        m_pXkbKeymap = pKeymap;
-
         for ( uint32_t i = 0; i < GAMESCOPE_WAYLAND_MOD_COUNT; i++ )
         {
-            xkb_mod_index_t uIndex = xkb_keymap_mod_get_index( m_pXkbKeymap, WaylandModifierToXkbModifierName( ( WaylandModifierIndex ) i ) );
+            xkb_mod_index_t uIndex = xkb_keymap_mod_get_index( pKeymap.get(), WaylandModifierToXkbModifierName( ( WaylandModifierIndex ) i ) );
             m_uModMask[ i ] = uIndex < 32 ? 1u << uIndex : 0;
         }
+
+        wlserver_lock();
+        bAccepted = wlserver_host_keyboard_keymap( std::move( pKeymap ) );
+        wlserver_unlock();
+        if ( bAccepted )
+            m_sKeymap = sKeymap;
+    }
+
+    void CWaylandInputThread::ResetKeymap()
+    {
+        wlserver_lock();
+        wlserver_host_keyboard_reset();
+        wlserver_unlock();
+        m_sKeymap.clear();
+        m_uKeyModifiers = 0;
+        std::fill( std::begin( m_uModMask ), std::end( m_uModMask ), 0 );
     }
     void CWaylandInputThread::Wayland_Keyboard_Enter( wl_keyboard *pKeyboard, uint32_t uSerial, wl_surface *pSurface, wl_array *pKeys )
     {
@@ -3266,14 +3313,22 @@ namespace gamescope
 		if ( !IsGamescopeToplevel( pSurface ) )
 			return;
 
+        ReleaseKeyboard();
+    }
+
+    void CWaylandInputThread::ReleaseKeyboard()
+    {
         m_bKeyboardEntered = false;
         m_uKeyModifiers = 0;
-
         for ( uint32_t uKey : m_uScancodesHeld )
             HandleKey( uKey, false );
-
         m_uScancodesHeld.clear();
+
+        wlserver_lock();
+        wlserver_host_keyboard_leave();
+        wlserver_unlock();
     }
+
     void CWaylandInputThread::Wayland_Keyboard_Key( wl_keyboard *pKeyboard, uint32_t uSerial, uint32_t uTime, uint32_t uKey, uint32_t uState )
     {
         if ( !m_bKeyboardEntered )
@@ -3294,9 +3349,15 @@ namespace gamescope
     void CWaylandInputThread::Wayland_Keyboard_Modifiers( wl_keyboard *pKeyboard, uint32_t uSerial, uint32_t uModsDepressed, uint32_t uModsLatched, uint32_t uModsLocked, uint32_t uGroup )
     {
         m_uKeyModifiers = uModsDepressed | uModsLatched | uModsLocked;
+        wlserver_lock();
+        wlserver_host_keyboard_modifiers( uModsDepressed, uModsLatched, uModsLocked, uGroup );
+        wlserver_unlock();
     }
     void CWaylandInputThread::Wayland_Keyboard_RepeatInfo( wl_keyboard *pKeyboard, int32_t nRate, int32_t nDelay )
     {
+        wlserver_lock();
+        wlserver_host_keyboard_repeat_info( nRate, nDelay );
+        wlserver_unlock();
     }
 
     // Relative Pointer

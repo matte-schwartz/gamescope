@@ -120,6 +120,7 @@ src = [
   'backend.cpp',
   'x11cursor.cpp',
   'InputEmulation.cpp',
+  'HostKeyboard.cpp',
   'LibInputHandler.cpp',
 ]
 

@@ -66,6 +66,7 @@
 #include "xwayland_ctx.hpp"
 #include "refresh_rate.h"
 #include "InputEmulation.h"
+#include "HostKeyboard.h"
 #include "commit.h"
 #include "Timeline.h"
 #include "Utils/Process.h"
@@ -81,6 +82,8 @@
 #include <set>
 
 static LogScope wl_log("wlserver");
+
+static std::unique_ptr<gamescope::CHostKeyboard> g_HostKeyboard;
 
 using namespace std::literals;
 
@@ -277,7 +280,7 @@ static void bump_input_counter()
 
 static void wlserver_handle_modifiers(struct wl_listener *listener, void *data)
 {
-	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
+	struct wlr_keyboard *keyboard = static_cast<wlr_keyboard *>( data );
 
 	wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
 	wlr_seat_keyboard_notify_modifiers( wlserver.wlr.seat, &keyboard->modifiers );
@@ -285,11 +288,8 @@ static void wlserver_handle_modifiers(struct wl_listener *listener, void *data)
 	bump_input_counter();
 }
 
-static void wlserver_handle_key(struct wl_listener *listener, void *data)
+static void wlserver_keyboard_key( struct wlr_keyboard *keyboard, struct wlr_keyboard_key_event *event )
 {
-	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
-	struct wlr_keyboard_key_event *event = (struct wlr_keyboard_key_event *) data;
-
 	xkb_keycode_t keycode = event->keycode + 8;
 	xkb_keysym_t keysym = xkb_state_key_get_one_sym(keyboard->xkb_state, keycode);
 
@@ -335,6 +335,26 @@ static void wlserver_handle_key(struct wl_listener *listener, void *data)
 
 	bump_input_counter();
 }
+
+static void wlserver_handle_key(struct wl_listener *listener, void *data)
+{
+	wlserver_keyboard_key( &wlserver.keyboard_group->keyboard, static_cast<wlr_keyboard_key_event *>( data ) );
+}
+
+static void wlserver_handle_host_key(struct wl_listener *listener, void *data)
+{
+	wlserver_keyboard_key( wlserver.wlr.virtual_keyboard_device, static_cast<wlr_keyboard_key_event *>( data ) );
+}
+
+static void wlserver_handle_host_modifiers(struct wl_listener *listener, void *data)
+{
+	// Keep an IME keyboard selected until actual host input resumes.
+	if ( wlr_seat_get_keyboard( wlserver.wlr.seat ) == data )
+		wlserver_handle_modifiers( listener, data );
+}
+
+static wl_listener host_keyboard_modifiers = { .notify = wlserver_handle_host_modifiers };
+static wl_listener host_keyboard_key = { .notify = wlserver_handle_host_key };
 
 static void wlserver_perform_rel_pointer_motion(double unaccel_dx, double unaccel_dy)
 {
@@ -2220,7 +2240,27 @@ bool wlserver_init( void ) {
 		return false;
 	}
 
-	wl_signal_emit( &wlserver.wlr.multi_backend->events.new_input, kbd );
+	wlserver_lock();
+	bool bKeyboardReady;
+	if ( g_HostKeyboard )
+	{
+		// Initialize the host keyboard before applying any buffered map.
+		bKeyboardReady = wlr_keyboard_set_keymap( kbd, keyboard->keymap );
+		if ( bKeyboardReady )
+		{
+			wl_signal_add( &kbd->events.modifiers, &host_keyboard_modifiers );
+			wl_signal_add( &kbd->events.key, &host_keyboard_key );
+			bKeyboardReady = g_HostKeyboard->Attach( kbd );
+		}
+	}
+	else
+	{
+		wl_signal_emit( &wlserver.wlr.multi_backend->events.new_input, kbd );
+		bKeyboardReady = true;
+	}
+	wlserver_unlock();
+	if ( !bKeyboardReady )
+		return false;
 
 #if HAVE_LIBEIS
 	{
@@ -2388,6 +2428,12 @@ void wlserver_run(void)
 		wl_list_remove( &wlserver.session_active.link );
 #endif
 
+	if ( g_HostKeyboard )
+	{
+		wl_list_remove( &host_keyboard_modifiers.link );
+		wl_list_remove( &host_keyboard_key.link );
+		wlserver_host_keyboard_finish();
+	}
 	wl_display_destroy_clients(wlserver.display);
 	wl_display_destroy(wlserver.display);
     wlserver.display = NULL;
@@ -2528,6 +2574,64 @@ void wlserver_key( uint32_t key, bool press, uint32_t time )
 	}
 
 	bump_input_counter();
+}
+
+void wlserver_host_keyboard_init()
+{
+	assert( wlserver_is_lock_held() );
+	g_HostKeyboard = std::make_unique<gamescope::CHostKeyboard>( gamescope::HasXkbEnvironmentOverride() );
+}
+
+void wlserver_host_keyboard_finish()
+{
+	assert( wlserver_is_lock_held() );
+	g_HostKeyboard.reset();
+}
+
+bool wlserver_host_keyboard_keymap( gamescope::XkbKeymap pKeymap )
+{
+	assert( wlserver_is_lock_held() );
+	if ( !g_HostKeyboard )
+		return false;
+	if ( g_HostKeyboard->SetKeymap( std::move( pKeymap ) ) )
+		return true;
+	wl_log.errorf( "Failed to set host keymap" );
+	return false;
+}
+
+void wlserver_host_keyboard_modifiers( uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group )
+{
+	assert( wlserver_is_lock_held() );
+	if ( g_HostKeyboard )
+		g_HostKeyboard->SetModifiers( depressed, latched, locked, group );
+}
+
+void wlserver_host_keyboard_repeat_info( int32_t rate, int32_t delay )
+{
+	assert( wlserver_is_lock_held() );
+	if ( g_HostKeyboard )
+		g_HostKeyboard->SetRepeatInfo( rate, delay );
+}
+
+void wlserver_host_keyboard_leave()
+{
+	assert( wlserver_is_lock_held() );
+	if ( g_HostKeyboard )
+		g_HostKeyboard->Leave();
+}
+
+void wlserver_host_keyboard_reset()
+{
+	assert( wlserver_is_lock_held() );
+	if ( g_HostKeyboard )
+		g_HostKeyboard->Reset();
+}
+
+void wlserver_host_keyboard_key( uint32_t key, bool press, uint32_t time )
+{
+	assert( wlserver_is_lock_held() );
+	if ( g_HostKeyboard )
+		g_HostKeyboard->Key( key, press, time );
 }
 
 struct wlr_surface *wlserver_surface_to_main_surface( struct wlr_surface *pSurface )

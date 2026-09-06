@@ -23,6 +23,7 @@
 #include "vulkan_include.h"
 
 #include "steamcompmgr_shared.hpp"
+#include "HostKeyboard.h"
 
 #if HAVE_DRM
 #define HAVE_SESSION 1
@@ -263,6 +264,15 @@ bool wlserver_is_lock_held(void);
 
 void wlserver_keyboardfocus( struct wlr_surface *surface, bool bConstrain = true );
 void wlserver_key( uint32_t key, bool press, uint32_t time );
+// Nested Wayland input. Call with wlserver_lock held, including before init.
+void wlserver_host_keyboard_init();
+bool wlserver_host_keyboard_keymap( gamescope::XkbKeymap pKeymap );
+void wlserver_host_keyboard_finish();
+void wlserver_host_keyboard_repeat_info( int32_t rate, int32_t delay );
+void wlserver_host_keyboard_modifiers( uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group );
+void wlserver_host_keyboard_leave();
+void wlserver_host_keyboard_reset();
+void wlserver_host_keyboard_key( uint32_t key, bool press, uint32_t time );
 
 void wlserver_mousefocus( struct wlr_surface *wlrsurface, int x = 0, int y = 0 );
 void wlserver_clear_dropdowns();
