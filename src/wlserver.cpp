@@ -2077,6 +2077,8 @@ bool wlserver_init( void ) {
 	// Create a keyboard group to keep all externally connected keyboards
 	// in sync (one single layout and a shared state)
 	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	if ( !context )
+		return false;
 	struct xkb_rule_names rules = { 0 };
 	rules.rules = getenv("XKB_DEFAULT_RULES");
 	rules.model = getenv("XKB_DEFAULT_MODEL");
@@ -2084,10 +2086,24 @@ bool wlserver_init( void ) {
 	rules.variant = getenv("XKB_DEFAULT_VARIANT");
 	rules.options = getenv("XKB_DEFAULT_OPTIONS");
 	struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, &rules, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	xkb_context_unref( context );
+	if ( !keymap )
+	{
+		wl_log.errorf( "Failed to compile the initial keyboard layout" );
+		return false;
+	}
 	wlserver.keyboard_group = wlr_keyboard_group_create();
+	if ( !wlserver.keyboard_group )
+	{
+		xkb_keymap_unref( keymap );
+		return false;
+	}
 	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
 	wlr_keyboard_set_repeat_info(keyboard, 25, 600);
-	wlr_keyboard_set_keymap(keyboard, keymap);
+	bool bKeymapSet = wlr_keyboard_set_keymap( keyboard, keymap );
+	xkb_keymap_unref( keymap );
+	if ( !bKeymapSet )
+		return false;
 	wlserver.keyboard_group_modifiers.notify = wlserver_handle_modifiers;
 	wl_signal_add(&keyboard->events.modifiers, &wlserver.keyboard_group_modifiers);
 	wlserver.keyboard_group_key.notify = wlserver_handle_key;
