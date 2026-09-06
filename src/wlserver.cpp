@@ -2288,7 +2288,7 @@ void wlserver_lock(void)
 
 void wlserver_unlock(bool flush)
 {
-    if (flush)
+    if (flush && wlserver.display)
 	    wl_display_flush_clients(wlserver.display);
 	pthread_mutex_unlock(&waylock);
 }
