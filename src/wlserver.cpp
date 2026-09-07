@@ -347,6 +347,8 @@ static void wlserver_handle_pointer_motion(struct wl_listener *listener, void *d
 {
 	struct wlr_pointer_motion_event *event = (struct wlr_pointer_motion_event *) data;
 
+	wlserver.physical_cursor_move = true;
+
 	wlserver_mousemotion(event->unaccel_dx, event->unaccel_dy, event->time_msec);
 }
 
@@ -2333,6 +2335,16 @@ void wlserver_run(void)
 			}
 
 			wlserver_unlock();
+
+			// need to defer these to avoid double-locking with m_mutActiveConnectors.
+			if ( wlserver.physical_cursor_move )
+			{
+				if ( GetBackend() )
+				{
+					GetBackend()->NotifyPhysicalInput( gamescope::InputType::Mouse );
+				}
+				wlserver.physical_cursor_move = false;
+			}
 		}
 	}
 

@@ -2148,12 +2148,14 @@ bool MouseCursor::getTexture()
 		return false;
 	}
 
+	bool bNested = GetBackend()->GetCurrentMouseConnector() && GetBackend()->GetCurrentMouseConnector()->GetNestedHints();
+
 	m_hotspotX = image->xhot;
 	m_hotspotY = image->yhot;
 
 	int nDesiredWidth = image->width;
 	int nDesiredHeight = image->height;
-	if ( g_nCursorScaleHeight > 0 )
+	if ( g_nCursorScaleHeight > 0 && !bNested )
 	{
 		GetDesiredSize( nDesiredWidth, nDesiredHeight );
 	}
@@ -2240,8 +2242,8 @@ bool MouseCursor::getTexture()
 	updateCursorFeedback();
 
 	if (m_imageEmpty) {
-		if ( GetBackend()->GetCurrentConnector() && GetBackend()->GetCurrentConnector()->GetNestedHints() )
-			GetBackend()->GetCurrentConnector()->GetNestedHints()->SetCursorImage( nullptr );
+		if ( bNested )
+			GetBackend()->GetCurrentMouseConnector()->GetNestedHints()->SetCursorImage( nullptr );
 		return false;
 	}
 
@@ -2255,7 +2257,7 @@ bool MouseCursor::getTexture()
 
 	m_texture = vulkan_create_texture_from_bits(surfaceWidth, surfaceHeight, nContentWidth, nContentHeight, DRM_FORMAT_ARGB8888, texCreateFlags, cursorBuffer.data());
 
-	if ( GetBackend()->GetCurrentConnector() && GetBackend()->GetCurrentConnector()->GetNestedHints() )
+	if ( bNested )
 	{
 		auto info = std::make_shared<gamescope::INestedHints::CursorInfo>(
 			gamescope::INestedHints::CursorInfo
@@ -2266,7 +2268,7 @@ bool MouseCursor::getTexture()
 				.uXHotspot = image->xhot,
 				.uYHotspot = image->yhot,
 			});
-		GetBackend()->GetCurrentConnector()->GetNestedHints()->SetCursorImage( std::move( info ) );
+		GetBackend()->GetCurrentMouseConnector()->GetNestedHints()->SetCursorImage( std::move( info ) );
 	}
 
 	assert(m_texture);
@@ -2347,9 +2349,13 @@ void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, str
 		scaledY += ((sourceHeight / 2) - winY) * currentScaleRatio_y;
 	}
 
-	// Apply the cursor offset inside the texture using the display scale
-	scaledX = scaledX - (m_hotspotX * cursor_scale);
-	scaledY = scaledY - (m_hotspotY * cursor_scale);
+	bool bNested = GetBackend()->GetCurrentMouseConnector() && GetBackend()->GetCurrentMouseConnector()->GetNestedHints();
+	if ( !bNested )
+	{
+		// Apply the cursor offset inside the texture using the display scale
+		scaledX = scaledX - (m_hotspotX * cursor_scale);
+		scaledY = scaledY - (m_hotspotY * cursor_scale);
+	}
 
 	FrameInfo_t::Layer_t *layer = frameInfo->layers.push();
 	if ( !layer )
