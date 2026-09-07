@@ -76,6 +76,7 @@ gamescope::ConVar<bool> cv_vr_debug_force_opaque( "vr_debug_force_opaque", false
 gamescope::ConVar<bool> cv_vr_nudge_to_visible( "vr_nudge_to_visible", false, "" );
 gamescope::ConVar<bool> cv_vr_nudge_to_visible_per_connector( "vr_nudge_to_visible_per_connector", false, "" );
 gamescope::ConVar<bool> cv_vr_click_focus( "vr_click_focus", true, "Move keyboard focus to the overlay a click lands on, without waiting for SteamVR to grant it." );
+gamescope::ConVar<float> cv_vr_cursor_size_in_meters( "vr_cursor_size_in_meters", 0.06f * 0.5f, "Size of the cursor in meters" );
 
 // Maximum interval between polling for VR events (normally paced by frame sync)
 gamescope::ConVar<uint32_t> cv_vr_poll_rate( "vr_poll_rate", 50ul, "Max time between input polls. In milliseconds." );
@@ -1714,8 +1715,7 @@ namespace gamescope
         const bool bUsingPhysicalMouse = !m_bUsingVRMouse;
         if ( pCursorLayer && pCursorInfo && bIsConnectorCurrentMouseFocus && !IsRelativeMouse() )
         {
-            static constexpr float k_fDesktopCursorWidth = 0.06f * 0.5f;
-            vr::VROverlay()->SetOverlayWidthInMeters( m_CursorPlane.GetOverlay(), k_fDesktopCursorWidth );
+            vr::VROverlay()->SetOverlayWidthInMeters( m_CursorPlane.GetOverlay(), cv_vr_cursor_size_in_meters );
 
             vr::HmdVector2_t vHotspot;
             vHotspot.v[ 0 ] = static_cast< float >( pCursorInfo->uXHotspot ) / pCursorInfo->uWidth;
@@ -1741,6 +1741,11 @@ namespace gamescope
             {
                 vr::VROverlay()->SetOverlayCursorPositionOverride( GetPrimaryPlane()->GetOverlay(), &vMousePos );
                 m_bCurrentlyOverridingPosition = true;
+            }
+            else
+            {
+                vr::VROverlay()->ClearOverlayCursorPositionOverride( GetPrimaryPlane()->GetOverlay() );
+                m_bCurrentlyOverridingPosition = false;
             }
         }
         else if ( m_bCurrentlyOverridingPosition )
