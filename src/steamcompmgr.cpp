@@ -4185,6 +4185,23 @@ carry_override_underlay( focus_t *pFocus, steamcompmgr_win_t *pPreviousOverride,
 	}
 }
 
+static bool win_treat_as_per_window( steamcompmgr_win_t *w, gamescope::VirtualConnectorStrategy eStrategy )
+{
+	if ( !w )
+		return false;
+
+	if ( eStrategy == gamescope::VirtualConnectorStrategies::PerWindow )
+		return true;
+
+	if ( eStrategy == gamescope::VirtualConnectorStrategies::PerAppId )
+	{
+		if ( w->appID == 0 )
+			return true;
+	}
+
+	return false;
+}
+
 static void
 handle_desktop_window(steamcompmgr_win_t *w);
 
@@ -4294,7 +4311,9 @@ found:;
 
 	if ( focus && focus->type == steamcompmgr_win_type_t::XWAYLAND )
 	{
-		if ( !focusControlWindow )
+		// Don't follow transient links for focus window when in per-window mode, or we end up duplicating
+		// windows in weird ways.
+		if ( !focusControlWindow && !win_treat_as_per_window( focus, eStrategy ) )
 		{
 			// Do some searches through game windows to follow transient links if needed
 			while ( true )
