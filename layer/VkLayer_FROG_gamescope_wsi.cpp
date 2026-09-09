@@ -4,6 +4,7 @@
 #include "vkroots.h"
 #include "xcb_helpers.hpp"
 #include "vulkan_operators.hpp"
+#include "present_timing.hpp"
 #include "gamescope-swapchain-client-protocol.h"
 #include "gamescope-limiter-client-protocol.h"
 #include "../src/color_helpers.h"
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <memory>
 #include <utility>
+#include <tuple>
 #include <vector>
 #include <algorithm>
 #include <functional>
@@ -102,6 +104,83 @@ namespace GamescopeWSILayer {
   private:
     T *object = nullptr;
     VkBaseOutStructure *parent = nullptr;
+  };
+
+  // Copy the chain so routing one swapchain never rewrites the caller's arrays.
+  class PresentInfoSlice {
+  public:
+    PresentInfoSlice(const VkPresentInfoKHR &source, uint32_t index, VkResult *result)
+      : info(source) {
+      info.swapchainCount = 1;
+      info.pSwapchains += index;
+      info.pImageIndices += index;
+      info.pResults = result;
+      info.waitSemaphoreCount = 0;
+      info.pWaitSemaphores = nullptr;
+      info.pNext = nullptr;
+      tail = &info.pNext;
+      for (auto *entry = static_cast<const VkBaseInStructure *>(source.pNext); entry; entry = entry->pNext) {
+        switch (entry->sType) {
+          case VK_STRUCTURE_TYPE_PRESENT_REGIONS_KHR:
+            slice<VkPresentRegionsKHR>(entry, index, &VkPresentRegionsKHR::pRegions); break;
+          case VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR:
+            slice<VkDeviceGroupPresentInfoKHR>(entry, index, &VkDeviceGroupPresentInfoKHR::pDeviceMasks); break;
+          case VK_STRUCTURE_TYPE_PRESENT_ID_KHR:
+            slice<VkPresentIdKHR>(entry, index, &VkPresentIdKHR::pPresentIds); break;
+          case VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR:
+            slice<VkPresentId2KHR>(entry, index, &VkPresentId2KHR::pPresentIds); break;
+          case VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT:
+            slice<VkPresentTimingsInfoEXT>(entry, index, &VkPresentTimingsInfoEXT::pTimingInfos); break;
+          case VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE:
+            slice<VkPresentTimesInfoGOOGLE>(entry, index, &VkPresentTimesInfoGOOGLE::pTimes); break;
+          case VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT:
+            slice<VkSwapchainPresentFenceInfoEXT>(entry, index, &VkSwapchainPresentFenceInfoEXT::pFences); break;
+          case VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT:
+            slice<VkSwapchainPresentModeInfoEXT>(entry, index, &VkSwapchainPresentModeInfoEXT::pPresentModes); break;
+          case VK_STRUCTURE_TYPE_DISPLAY_PRESENT_INFO_KHR:
+            append<VkDisplayPresentInfoKHR>(entry); break;
+          case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT: {
+            auto &boundary = append<VkFrameBoundaryEXT>(entry);
+            if (index + 1 != source.swapchainCount)
+              boundary.flags &= ~VK_FRAME_BOUNDARY_FRAME_END_BIT_EXT;
+            break;
+          }
+          default: complete = false; break;
+        }
+      }
+    }
+
+    PresentInfoSlice(const PresentInfoSlice &) = delete;
+    PresentInfoSlice &operator=(const PresentInfoSlice &) = delete;
+
+    VkPresentInfoKHR info;
+    bool complete = true;
+
+  private:
+    template<typename T>
+    T &append(const VkBaseInStructure *entry) {
+      auto &copy = std::get<T>(chain);
+      copy = *reinterpret_cast<const T *>(entry);
+      copy.pNext = nullptr;
+      *tail = &copy;
+      tail = &copy.pNext;
+      return copy;
+    }
+
+    template<typename T, typename Array>
+    void slice(const VkBaseInStructure *entry, uint32_t index, Array T::*array) {
+      auto &copy = append<T>(entry);
+      if (copy.swapchainCount) {
+        copy.swapchainCount = 1;
+        if (copy.*array)
+          copy.*array += index;
+      }
+    }
+
+    const void **tail;
+    std::tuple<VkPresentRegionsKHR, VkDeviceGroupPresentInfoKHR, VkPresentIdKHR, VkPresentId2KHR,
+      VkPresentTimingsInfoEXT, VkPresentTimesInfoGOOGLE, VkSwapchainPresentFenceInfoEXT,
+      VkSwapchainPresentModeInfoEXT, VkDisplayPresentInfoKHR, VkFrameBoundaryEXT> chain;
   };
 
   uint32_t clientAppId() {
@@ -443,10 +522,10 @@ namespace GamescopeWSILayer {
 
       if (interface == "wl_compositor"sv) {
         objects->compositor = reinterpret_cast<wl_compositor *>(
-          wl_registry_bind(registry, name, &wl_compositor_interface, version));
+          wl_registry_bind(registry, name, &wl_compositor_interface, std::min(version, uint32_t(wl_compositor_interface.version))));
       } else if (interface == "gamescope_swapchain_factory_v2"sv) {
         objects->gamescopeSwapchainFactory = reinterpret_cast<gamescope_swapchain_factory_v2 *>(
-          wl_registry_bind(registry, name, &gamescope_swapchain_factory_v2_interface, version));
+          wl_registry_bind(registry, name, &gamescope_swapchain_factory_v2_interface, std::min(version, uint32_t(gamescope_swapchain_factory_v2_interface.version))));
       } else if (interface == "gamescope_limiter"sv) {
         objects->limiterState = std::make_shared<GamescopeLimiterState>();
         // Cap at our version, binding higher is a fatal protocol error.
@@ -620,6 +699,8 @@ namespace GamescopeWSILayer {
     uint32_t serverId = 0;
     bool isHdrColorspace = false;
     std::unique_ptr<std::atomic<bool>> retired = std::make_unique<std::atomic<bool>>(false);
+    bool presentTimingEnabled = false;
+    PresentTimingQueue timingQueue;
 
     std::unique_ptr<std::mutex> presentTimingMutex = std::make_unique<std::mutex>();
     std::vector<VkPastPresentationTimingGOOGLE> pastPresentTimings;
@@ -675,7 +756,114 @@ namespace GamescopeWSILayer {
       }
       fprintf(stderr, "[Gamescope WSI] Swapchain retired\n");
     },
+    .present_timing = [](void *data, gamescope_swapchain *, uint32_t serialHi, uint32_t serialLo,
+                         uint32_t queueEndHi, uint32_t queueEndLo, uint32_t dequeuedHi, uint32_t dequeuedLo,
+                         uint32_t pixelOutHi, uint32_t pixelOutLo) {
+      auto *swapchain = static_cast<GamescopeSwapchainData *>(data);
+      std::lock_guard lock(*swapchain->presentTimingMutex);
+      swapchain->timingQueue.complete((uint64_t(serialHi) << 32) | serialLo,
+        (uint64_t(queueEndHi) << 32) | queueEndLo, (uint64_t(dequeuedHi) << 32) | dequeuedLo,
+        (uint64_t(pixelOutHi) << 32) | pixelOutLo);
+    },
+    .timing_properties = [](void *data, gamescope_swapchain *, uint32_t durationHi, uint32_t durationLo,
+                            uint32_t intervalHi, uint32_t intervalLo) {
+      auto *swapchain = static_cast<GamescopeSwapchainData *>(data);
+      std::lock_guard lock(*swapchain->presentTimingMutex);
+      if (swapchain->isBypassingXWayland && !swapchain->isWayland)
+        swapchain->timingQueue.setTimingProperties((uint64_t(durationHi) << 32) | durationLo,
+                                                  (uint64_t(intervalHi) << 32) | intervalLo);
+    },
+
   };
+
+  template<typename Function, typename T, typename... Args>
+  static VkResult enumerateValues(Function function, std::vector<T> &values, Args... args) {
+    for (;;) {
+      uint32_t count = 0;
+      VkResult result = function(args..., &count, nullptr);
+      if (result != VK_SUCCESS)
+        return result;
+      values.resize(count);
+      if (!count)
+        return VK_SUCCESS;
+      result = function(args..., &count, values.data());
+      if (result == VK_INCOMPLETE)
+        continue;
+      values.resize(count);
+      return result;
+    }
+  }
+
+  static_assert(uint32_t(GAMESCOPE_SWAPCHAIN_PRESENT_TIMING_FLAGS_RELATIVE) == uint32_t(VK_PRESENT_TIMING_INFO_PRESENT_AT_RELATIVE_TIME_BIT_EXT));
+  static_assert(uint32_t(GAMESCOPE_SWAPCHAIN_PRESENT_TIMING_FLAGS_NEAREST_REFRESH_CYCLE) == uint32_t(VK_PRESENT_TIMING_INFO_PRESENT_AT_NEAREST_REFRESH_CYCLE_BIT_EXT));
+
+  static bool hasExtension(const std::vector<VkExtensionProperties> &extensions, std::string_view name) {
+    return std::ranges::any_of(extensions, [&](const auto &extension) { return name == extension.extensionName; });
+  }
+
+  static bool presentTimingSupported(const vkroots::VkPhysicalDeviceDispatch &dispatch,
+                                      VkPhysicalDevice physicalDevice,
+                                      const std::vector<VkExtensionProperties> *knownExtensions = nullptr) {
+    auto instance = gamescopeInstances.find(dispatch.pInstanceDispatch->Instance);
+    if (!instance || !instance->waylandObjects.gamescopeSwapchainFactory ||
+        gamescope_swapchain_factory_v2_get_version(instance->waylandObjects.gamescopeSwapchainFactory) < 2)
+      return false;
+    std::vector<VkExtensionProperties> extensions;
+    if (!knownExtensions) {
+      if (enumerateValues(std::bind_front(&vkroots::VkPhysicalDeviceDispatch::EnumerateDeviceExtensionProperties, &dispatch),
+                                     extensions, physicalDevice, nullptr) != VK_SUCCESS)
+        return false;
+      knownExtensions = &extensions;
+    }
+    for (const char *dependency : { VK_KHR_PRESENT_ID_2_EXTENSION_NAME, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME }) {
+      if (!hasExtension(*knownExtensions, dependency))
+        return false;
+    }
+    return true;
+  }
+
+  // Every layer stage is reported in CLOCK_MONOTONIC, so a local domain query
+  // needs no driver call. Mixed queries forward only the driver's domains.
+  template<typename Next>
+  static VkResult calibratePresentTimestamps(Next next, VkDevice device, uint32_t count,
+      const VkCalibratedTimestampInfoKHR *infos, uint64_t *timestamps, uint64_t *maxDeviation) {
+    std::vector<VkCalibratedTimestampInfoKHR> driverInfos;
+    std::vector<uint32_t> driverIndices;
+    std::vector<uint32_t> localIndices;
+    for (uint32_t i = 0; i < count; i++) {
+      bool local = false;
+      if (infos[i].timeDomain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT ||
+          infos[i].timeDomain == VK_TIME_DOMAIN_SWAPCHAIN_LOCAL_EXT) {
+        if (auto *swapchainInfo = vkroots::FindInChain<const VkSwapchainCalibratedTimestampInfoEXT>(&infos[i]))
+          local = gamescopeSwapchains.find(swapchainInfo->swapchain) != nullptr;
+      }
+      if (local) {
+        localIndices.push_back(i);
+      } else {
+        driverIndices.push_back(i);
+        driverInfos.push_back(infos[i]);
+      }
+    }
+    if (localIndices.empty())
+      return next(device, count, infos, timestamps, maxDeviation);
+
+    std::vector<uint64_t> driverTimes(driverInfos.size());
+    uint64_t deviation = 0;
+    const uint64_t before = getTimeMonotonic();
+    if (!driverInfos.empty()) {
+      VkResult result = next(device, uint32_t(driverInfos.size()), driverInfos.data(), driverTimes.data(), &deviation);
+      if (result != VK_SUCCESS)
+        return result;
+    }
+    const uint64_t after = getTimeMonotonic();
+    for (uint32_t i : localIndices)
+      timestamps[i] = before + (after - before) / 2;
+    for (size_t i = 0; i < driverIndices.size(); i++)
+      timestamps[driverIndices[i]] = driverTimes[i];
+    const uint64_t span = after - before;
+    *maxDeviation = deviation > UINT64_MAX - span ? UINT64_MAX : deviation + span;
+    return VK_SUCCESS;
+  }
 
   class VkInstanceOverrides {
   public:
@@ -793,9 +981,20 @@ namespace GamescopeWSILayer {
       const VkDeviceCreateInfo*          pCreateInfo,
       const VkAllocationCallbacks*       pAllocator,
             VkDevice*                    pDevice) {
+      if (!gamescopeInstances.find(pDispatch.pInstanceDispatch->Instance))
+        return pDispatch.CreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
       VkDeviceCreateInfo deviceCreateInfo = *pCreateInfo;
+      std::vector<VkExtensionProperties> driverExtensions;
+      VkResult extensionResult = enumerateValues(std::bind_front(&vkroots::VkPhysicalDeviceDispatch::EnumerateDeviceExtensionProperties, &pDispatch),
+        driverExtensions, physicalDevice, nullptr);
+      if (extensionResult != VK_SUCCESS)
+        return extensionResult;
+      const bool driverPresentTiming = hasExtension(driverExtensions, VK_EXT_PRESENT_TIMING_EXTENSION_NAME);
+      ChainRemoval<VkPhysicalDevicePresentTimingFeaturesEXT> timingFeatures(&deviceCreateInfo, !driverPresentTiming);
 
       std::vector<const char *> extensions(pCreateInfo->ppEnabledExtensionNames, pCreateInfo->ppEnabledExtensionNames + pCreateInfo->enabledExtensionCount);
+      if (!driverPresentTiming)
+        std::erase_if(extensions, [](const char *extension) { return std::string_view(extension) == VK_EXT_PRESENT_TIMING_EXTENSION_NAME; });
       if (!contains(extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME))
         extensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
       deviceCreateInfo.ppEnabledExtensionNames = extensions.data();
@@ -1034,6 +1233,17 @@ namespace GamescopeWSILayer {
         pSurfaceCapabilities->surfaceCapabilities.currentExtent = rect->extent;
       }
       pSurfaceCapabilities->surfaceCapabilities.minImageCount = getMinImageCount();
+      if (auto *timing = vkroots::FindInChainMutable<VkPresentTimingSurfaceCapabilitiesEXT>(pSurfaceCapabilities)) {
+        // Only bypassing swapchains reach the compositor's timing path.
+        const bool supported = !gamescopeSurface->isWayland() && gamescopeSurface->canBypassXWayland() &&
+          presentTimingSupported(pDispatch, physicalDevice);
+        timing->presentTimingSupported = supported;
+        timing->presentAtAbsoluteTimeSupported = supported;
+        timing->presentAtRelativeTimeSupported = supported;
+        timing->presentStageQueries = supported ?
+          VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT | VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT |
+          VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT : 0;
+      }
 
       return VK_SUCCESS;
     }
@@ -1043,6 +1253,12 @@ namespace GamescopeWSILayer {
             VkPhysicalDevice             physicalDevice,
             VkPhysicalDeviceFeatures2*   pFeatures) {
       pDispatch.GetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+      if (auto *timing = vkroots::FindInChainMutable<VkPhysicalDevicePresentTimingFeaturesEXT>(pFeatures)) {
+        const VkBool32 supported = presentTimingSupported(pDispatch, physicalDevice);
+        timing->presentTiming = supported;
+        timing->presentAtAbsoluteTime = supported;
+        timing->presentAtRelativeTime = supported;
+      }
     }
 
     static void GetPhysicalDeviceFeatures2KHR(
@@ -1089,30 +1305,58 @@ namespace GamescopeWSILayer {
             const char*                  pLayerName,
             uint32_t*                    pPropertyCount,
             VkExtensionProperties*       pProperties) {
-      static constexpr std::array<VkExtensionProperties, 2> s_LayerExposedExts = {{
-        { VK_EXT_HDR_METADATA_EXTENSION_NAME,
-          VK_EXT_HDR_METADATA_SPEC_VERSION },
-        { VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
-          VK_GOOGLE_DISPLAY_TIMING_SPEC_VERSION },
-      }};
-
-      if (pLayerName) {
-        if (pLayerName == "VK_LAYER_FROG_gamescope_wsi"sv) {
-          return vkroots::array(s_LayerExposedExts, pPropertyCount, pProperties);
-        } else {
-          return pDispatch.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+      if (!gamescopeInstances.find(pDispatch.pInstanceDispatch->Instance) ||
+          (pLayerName && pLayerName != "VK_LAYER_FROG_gamescope_wsi"sv))
+        return pDispatch.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+      std::vector<VkExtensionProperties> driverExtensions;
+      VkResult result = enumerateValues(std::bind_front(&vkroots::VkPhysicalDeviceDispatch::EnumerateDeviceExtensionProperties, &pDispatch),
+        driverExtensions, physicalDevice, nullptr);
+      if (result != VK_SUCCESS)
+        return result;
+      auto extensions = pLayerName ? std::vector<VkExtensionProperties>{} : driverExtensions;
+      auto append = [&](const char *name, uint32_t version) {
+        if (!hasExtension(extensions, name)) {
+          VkExtensionProperties property{};
+          std::strncpy(property.extensionName, name, sizeof(property.extensionName) - 1);
+          property.specVersion = version;
+          extensions.push_back(property);
         }
-      }
+      };
+      append(VK_EXT_HDR_METADATA_EXTENSION_NAME, VK_EXT_HDR_METADATA_SPEC_VERSION);
+      append(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME, VK_GOOGLE_DISPLAY_TIMING_SPEC_VERSION);
+      if (presentTimingSupported(pDispatch, physicalDevice, &driverExtensions))
+        append(VK_EXT_PRESENT_TIMING_EXTENSION_NAME, VK_EXT_PRESENT_TIMING_SPEC_VERSION);
+      return vkroots::array(extensions, pPropertyCount, pProperties);
+    }
 
-      VkResult result = vkroots::append(
-        std::bind_front(&vkroots::VkPhysicalDeviceDispatch::EnumerateDeviceExtensionProperties, &pDispatch),
-        s_LayerExposedExts,
-        pPropertyCount,
-        pProperties,
-        physicalDevice,
-        pLayerName);
 
-      return result;
+    static VkResult GetPhysicalDeviceCalibrateableTimeDomainsKHR(
+      const vkroots::VkPhysicalDeviceDispatch &dispatch, VkPhysicalDevice physicalDevice,
+      uint32_t *count, VkTimeDomainKHR *domains) {
+      return CalibrateableTimeDomains(dispatch, physicalDevice, count, domains,
+        std::bind_front(&vkroots::VkPhysicalDeviceDispatch::GetPhysicalDeviceCalibrateableTimeDomainsKHR, &dispatch));
+    }
+
+    static VkResult GetPhysicalDeviceCalibrateableTimeDomainsEXT(
+      const vkroots::VkPhysicalDeviceDispatch &dispatch, VkPhysicalDevice physicalDevice,
+      uint32_t *count, VkTimeDomainKHR *domains) {
+      return CalibrateableTimeDomains(dispatch, physicalDevice, count, domains,
+        std::bind_front(&vkroots::VkPhysicalDeviceDispatch::GetPhysicalDeviceCalibrateableTimeDomainsEXT, &dispatch));
+    }
+
+    template<typename Next>
+    static VkResult CalibrateableTimeDomains(
+      const vkroots::VkPhysicalDeviceDispatch &dispatch, VkPhysicalDevice physicalDevice,
+      uint32_t *count, VkTimeDomainKHR *domains, Next next) {
+      if (!presentTimingSupported(dispatch, physicalDevice))
+        return next(physicalDevice, count, domains);
+      std::vector<VkTimeDomainKHR> values;
+      VkResult result = enumerateValues(next, values, physicalDevice);
+      if (result != VK_SUCCESS)
+        return result;
+      if (std::ranges::find(values, VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT) == values.end())
+        values.push_back(VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT);
+      return vkroots::array(values, count, domains);
     }
 
   private:
@@ -1272,6 +1516,7 @@ namespace GamescopeWSILayer {
       const bool canBypass = gamescopeSurface->canBypassXWayland(hdrColorspace);
 
       VkSwapchainCreateInfoKHR swapchainInfo = *pCreateInfo;
+      swapchainInfo.flags &= ~VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
 
       if (pCreateInfo->oldSwapchain) {
         if (auto gamescopeSwapchain = gamescopeSwapchains.find(pCreateInfo->oldSwapchain)) {
@@ -1409,6 +1654,8 @@ namespace GamescopeWSILayer {
           .extent              = pCreateInfo->imageExtent,
           .serverId            = serverId,
           .isHdrColorspace     = hdrColorspace,
+          .presentTimingEnabled = !!(pCreateInfo->flags & VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT) &&
+            gamescope_swapchain_factory_v2_get_version(gamescopeSurface->waylandObjects.gamescopeSwapchainFactory) >= 2,
         });
         if (!gamescopeSwapchain) {
           gamescope_swapchain_destroy(gamescopeSwapchainObject);
@@ -1425,10 +1672,11 @@ namespace GamescopeWSILayer {
       uint32_t imageCount = 0;
       pDispatch.GetSwapchainImagesKHR(device, *pSwapchain, &imageCount, nullptr);
 
-      fprintf(stderr, "[Gamescope WSI] Created swapchain for xid: 0x%0x swapchain: %p - imageCount: %u\n",
+      fprintf(stderr, "[Gamescope WSI] Created swapchain for xid: 0x%0x swapchain: %p - imageCount: %u - presentTiming: %s\n",
         gamescopeSurface->window,
         reinterpret_cast<void*>(*pSwapchain),
-        imageCount);
+        imageCount,
+        !(pCreateInfo->flags & VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT) ? "off" : canBypass ? "on" : "no bypass");
 
       gamescope_swapchain_swapchain_feedback(
         gamescopeSwapchainObject,
@@ -1476,14 +1724,19 @@ namespace GamescopeWSILayer {
       return pDispatch.AcquireNextImage2KHR(device, pAcquireInfo, pImageIndex);
     }
 
-    // A present that fails with VK_ERROR_OUT_OF_DATE_KHR must still perform
-    // its queue operations. We never forward a retired swapchain's present to
-    // the driver, so wait the semaphores and signal any
-    // VkSwapchainPresentFenceInfoEXT fences ourselves with an empty submit.
-    static VkResult PresentRetiredSwapchain(
+    // Once the waits are submitted an OOM return can no longer promise the
+    // untouched synchronization state vkQueuePresentKHR requires of it.
+    static VkResult AfterSubmission(VkResult result) {
+      return result == VK_ERROR_OUT_OF_HOST_MEMORY || result == VK_ERROR_OUT_OF_DEVICE_MEMORY ? VK_ERROR_DEVICE_LOST : result;
+    }
+
+    // A refused present must still run its waits and signal its present fences.
+    static VkResult PresentWithoutImage(
       const vkroots::VkQueueDispatch & pDispatch,
             VkQueue                    queue,
-      const VkPresentInfoKHR*          pPresentInfo) {
+      const VkPresentInfoKHR*          pPresentInfo,
+            VkResult                   presentResult,
+            bool                       releaseImages) {
       std::vector<VkPipelineStageFlags> waitStages(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 
       std::vector<VkFence> presentFences;
@@ -1494,33 +1747,124 @@ namespace GamescopeWSILayer {
         }
       }
 
-      if (pPresentInfo->waitSemaphoreCount || !presentFences.empty()) {
+      std::vector<VkResult> swapchainResults(pPresentInfo->swapchainCount, presentResult);
+      // A refused last slice still owes tools the frame end its siblings dropped.
+      std::optional<VkFrameBoundaryEXT> boundary;
+      if (auto *entry = vkroots::FindInChain<VkFrameBoundaryEXT>(pPresentInfo)) {
+        boundary = *entry;
+        boundary->pNext = nullptr;
+      }
+      if (pPresentInfo->waitSemaphoreCount || !presentFences.empty() || boundary) {
         VkSubmitInfo submitInfo = {
           .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+          .pNext              = boundary ? &*boundary : nullptr,
           .waitSemaphoreCount = pPresentInfo->waitSemaphoreCount,
           .pWaitSemaphores    = pPresentInfo->pWaitSemaphores,
           .pWaitDstStageMask  = waitStages.data(),
         };
 
         VkResult result = pDispatch.QueueSubmit(queue, 1, &submitInfo, presentFences.empty() ? VK_NULL_HANDLE : presentFences[0]);
+        if (result < VK_SUCCESS)
+          return result;
 
         // Fence signals are ordered after everything earlier in submission
         // order, so any extra fences can ride empty submits.
-        for (size_t i = 1; i < presentFences.size() && result == VK_SUCCESS; i++) {
+        for (size_t i = 1; i < presentFences.size(); i++) {
           VkSubmitInfo emptySubmitInfo = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
-          result = pDispatch.QueueSubmit(queue, 1, &emptySubmitInfo, presentFences[i]);
+          if (VkResult extra = pDispatch.QueueSubmit(queue, 1, &emptySubmitInfo, presentFences[i]); extra < VK_SUCCESS)
+            return AfterSubmission(extra);
         }
+      }
 
+      VkResult result = presentResult;
+      if (releaseImages) {
+        if (VkResult idle = pDispatch.QueueWaitIdle(queue); idle < VK_SUCCESS)
+          return AfterSubmission(idle);
+        // One swapchain's release failing must not leave the others acquired.
+        for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+          VkReleaseSwapchainImagesInfoKHR releaseInfo = {
+            .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_KHR,
+            .swapchain = pPresentInfo->pSwapchains[i],
+            .imageIndexCount = 1,
+            .pImageIndices = &pPresentInfo->pImageIndices[i],
+          };
+          VkResult released = pDispatch.ReleaseSwapchainImagesEXT(pDispatch.pDeviceDispatch->Device, &releaseInfo);
+          if (released < VK_SUCCESS) {
+            swapchainResults[i] = released;
+            result = MergePresentResults(result, released);
+          }
+        }
+      }
+
+      if (pPresentInfo->pResults)
+        std::copy(swapchainResults.begin(), swapchainResults.end(), pPresentInfo->pResults);
+
+      return result;
+    }
+
+    static VkResult MergePresentResults(VkResult previous, VkResult current) {
+      // The precedence vkQueuePresentKHR's return value rules give these codes.
+      auto priority = [](VkResult result) {
+        switch (result) {
+          case VK_ERROR_DEVICE_LOST: return 7;
+          case VK_ERROR_SURFACE_LOST_KHR: return 5;
+          case VK_ERROR_OUT_OF_DATE_KHR: return 4;
+          case VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT: return 3;
+          case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT: return 2;
+          case VK_SUBOPTIMAL_KHR: return 1;
+          case VK_SUCCESS: return 0;
+          default: return result < VK_SUCCESS ? 6 : 0;
+        }
+      };
+      return priority(current) > priority(previous) ? current : previous;
+    }
+
+    // An unsupported chain entry cannot be sliced, so such a batch keeps the whole-batch behavior.
+    static bool CanSplit(const VkPresentInfoKHR &info) {
+      return info.swapchainCount > 1 && PresentInfoSlice(info, 0, nullptr).complete;
+    }
+
+    static VkResult PresentSwapchains(const vkroots::VkQueueDispatch &dispatch, VkQueue queue,
+                                     const VkPresentInfoKHR *info) {
+      std::vector<VkPipelineStageFlags> stages(info->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      std::vector<VkResult> results(info->swapchainCount, VK_SUCCESS);
+      bool submitted = false;
+      if (info->waitSemaphoreCount) {
+        VkSubmitInfo submit = {
+          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+          .waitSemaphoreCount = info->waitSemaphoreCount,
+          .pWaitSemaphores = info->pWaitSemaphores,
+          .pWaitDstStageMask = stages.data(),
+        };
+        VkResult result = dispatch.QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
         if (result < VK_SUCCESS)
           return result;
+        submitted = true;
+        // A queue-ordered wait alone does not synchronize a later presentation engine read.
+        if (VkResult idle = dispatch.QueueWaitIdle(queue); idle < VK_SUCCESS)
+          return AfterSubmission(idle);
       }
 
-      if (pPresentInfo->pResults) {
-        for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
-          pPresentInfo->pResults[i] = VK_ERROR_OUT_OF_DATE_KHR;
+      VkResult result = VK_SUCCESS;
+      for (uint32_t i = 0; i < info->swapchainCount; i++) {
+        PresentInfoSlice single(*info, i, &results[i]);
+        VkResult current = gamescopeSwapchains.find(info->pSwapchains[i])
+          ? QueuePresentKHR(dispatch, queue, &single.info)
+          : dispatch.QueuePresentKHR(queue, &single.info);
+        if (submitted)
+          current = AfterSubmission(current);
+        results[i] = MergePresentResults(results[i], current);
+        result = MergePresentResults(result, results[i]);
+        if (current == VK_ERROR_OUT_OF_HOST_MEMORY || current == VK_ERROR_OUT_OF_DEVICE_MEMORY ||
+            current == VK_ERROR_DEVICE_LOST) {
+          std::fill(results.begin() + i + 1, results.end(), current);
+          break;
+        }
+        submitted = true;
       }
-
-      return VK_ERROR_OUT_OF_DATE_KHR;
+      if (info->pResults)
+        std::copy(results.begin(), results.end(), info->pResults);
+      return result;
     }
 
     static VkResult QueuePresentKHR(
@@ -1530,33 +1874,123 @@ namespace GamescopeWSILayer {
       VkPresentInfoKHR presentInfo = *pPresentInfo;
 
       auto pPresentTimes = vkroots::FindInChain<const VkPresentTimesInfoGOOGLE>(&presentInfo);
-
-      wl_display *display = nullptr;
+      auto pPresentTimings = vkroots::FindInChain<const VkPresentTimingsInfoEXT>(&presentInfo);
+      auto pPresentIds = vkroots::FindInChain<const VkPresentIdKHR>(&presentInfo);
+      auto pPresentIds2 = vkroots::FindInChain<const VkPresentId2KHR>(&presentInfo);
+      if (pPresentTimings && pPresentTimings->pTimingInfos && CanSplit(presentInfo)) {
+        bool layer = false, native = false;
+        for (uint32_t i = 0; i < presentInfo.swapchainCount; i++) {
+          if (gamescopeSwapchains.find(presentInfo.pSwapchains[i]))
+            layer = true;
+          else
+            native = true;
+        }
+        if (layer && native)
+          return PresentSwapchains(pDispatch, queue, pPresentInfo);
+      }
+      bool anyLayer = false;
+      // A report read now frees its slot for this present.
       for (uint32_t i = 0; i < presentInfo.swapchainCount; i++) {
-        if (auto gamescopeSwapchain = gamescopeSwapchains.find(presentInfo.pSwapchains[i])) {
-          if (waylandPumpEvents(gamescopeSwapchain->display, gamescopeSwapchain->eventQueue, !gamescopeSwapchain->isWayland) < 0)
-            return PresentRetiredSwapchain(pDispatch, queue, pPresentInfo);
-          if (*gamescopeSwapchain->retired) {
-            return PresentRetiredSwapchain(pDispatch, queue, pPresentInfo);
-          }
-
-          if (pPresentTimes && pPresentTimes->pTimes) {
-            assert(pPresentTimes->swapchainCount == presentInfo.swapchainCount);
-
-#if GAMESCOPE_WSI_DISPLAY_TIMING_DEBUG
-            fprintf(stderr, "[Gamescope WSI] QueuePresentKHR: presentID: %u - desiredPresentTime: %lu - now: %lu\n", pPresentTimes->pTimes[i].presentID, pPresentTimes->pTimes[i].desiredPresentTime, getTimeMonotonic());
-#endif
-            gamescope_swapchain_set_present_time(
-              gamescopeSwapchain->object,
-              pPresentTimes->pTimes[i].presentID,
-              pPresentTimes->pTimes[i].desiredPresentTime >> 32,
-              pPresentTimes->pTimes[i].desiredPresentTime & 0xffffffff);
-          }
-
-          assert(display == nullptr || display == gamescopeSwapchain->display);
-          display = gamescopeSwapchain->display;
+        auto swapchain = gamescopeSwapchains.find(presentInfo.pSwapchains[i]);
+        if (!swapchain)
+          continue;
+        anyLayer = true;
+        if (waylandPumpEvents(swapchain->display, swapchain->eventQueue, !swapchain->isWayland) < 0 || *swapchain->retired) {
+          if (CanSplit(presentInfo))
+            return PresentSwapchains(pDispatch, queue, pPresentInfo);
+          return PresentWithoutImage(pDispatch, queue, pPresentInfo, VK_ERROR_OUT_OF_DATE_KHR, false);
         }
       }
+      if (!anyLayer) {
+        static bool s_warned = false;
+        if (!s_warned) {
+          int messageId = -1;
+          messagey::ShowSimple(
+            "QueuePresentKHR: Attempting to present to a non-hooked swapchain.\nHooking has failed somewhere!\nYou may have a bad Vulkan layer interfering.\nPress OK to try to power through this error, or Cancel to stop.",
+            "Gamescope WSI Layer Error",
+            messagey::MessageBoxFlag::Warning | messagey::MessageBoxFlag::Simple_Cancel | messagey::MessageBoxFlag::Simple_OK,
+            &messageId);
+          if (messageId == 0) // Cancel
+            abort();
+          s_warned = true;
+        }
+        return pDispatch.QueuePresentKHR(queue, pPresentInfo);
+      }
+
+      auto presentId = [&](uint32_t i) -> uint64_t {
+        if (pPresentIds2 && pPresentIds2->pPresentIds)
+          return pPresentIds2->pPresentIds[i];
+        if (pPresentIds && pPresentIds->pPresentIds)
+          return pPresentIds->pPresentIds[i];
+        return 0;
+      };
+
+      auto timingRequest = [&](uint32_t i, const GamescopeSwapchainData *swapchain) -> const VkPresentTimingInfoEXT * {
+        if (pPresentTimings && pPresentTimings->pTimingInfos && swapchain->presentTimingEnabled)
+          return &pPresentTimings->pTimingInfos[i];
+        return nullptr;
+      };
+
+      // Refuse before any slot is taken. The compositor must never see it.
+      for (uint32_t i = 0; i < presentInfo.swapchainCount; i++) {
+        auto swapchain = gamescopeSwapchains.find(presentInfo.pSwapchains[i]);
+        if (!swapchain)
+          continue;
+        if (auto *timing = timingRequest(i, swapchain); timing && timing->presentStageQueries) {
+          std::lock_guard lock(*swapchain->presentTimingMutex);
+          if (swapchain->timingQueue.hasSlot())
+            continue;
+        } else {
+          continue;
+        }
+        // Past the lock, as the split re-enters here for this swapchain.
+        if (CanSplit(presentInfo))
+          return PresentSwapchains(pDispatch, queue, pPresentInfo);
+        return PresentWithoutImage(pDispatch, queue, pPresentInfo, VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT, true);
+      }
+
+      std::vector<VkResult> timingResults(presentInfo.swapchainCount, VK_SUCCESS);
+      std::vector<uint64_t> timingSerials(presentInfo.swapchainCount, 0);
+      std::vector<bool> timingArmed(presentInfo.swapchainCount, false);
+      for (uint32_t i = 0; i < presentInfo.swapchainCount; i++) {
+        auto swapchain = gamescopeSwapchains.find(presentInfo.pSwapchains[i]);
+        if (!swapchain)
+          continue;
+        if (auto *pTiming = timingRequest(i, swapchain)) {
+          const auto &timing = *pTiming;
+          const bool target = timing.targetTime || (timing.flags & VK_PRESENT_TIMING_INFO_PRESENT_AT_RELATIVE_TIME_BIT_EXT);
+          const bool bypass = swapchain->isBypassingXWayland && !swapchain->isWayland;
+          std::lock_guard lock(*swapchain->presentTimingMutex);
+          uint64_t serial = 0;
+          // The one advertised domain is CLOCK_MONOTONIC, so the target stage and domain id are moot.
+          if (timing.presentStageQueries)
+            serial = timingSerials[i] = *swapchain->timingQueue.reserve(presentId(i), timing.targetTime, timing.presentStageQueries);
+          // A target needs bypass. Forward so the driver releases the image.
+          if (!bypass) {
+            if (serial)
+              swapchain->timingQueue.complete(serial, 0, 0, 0);
+            if (target)
+              timingResults[i] = VK_ERROR_OUT_OF_DATE_KHR;
+          } else if (serial || target) {
+            if (!serial)
+              serial = swapchain->timingQueue.nextSerial();
+            timingArmed[i] = true;
+            gamescope_swapchain_set_present_timing(swapchain->object, serial >> 32, uint32_t(serial),
+              timing.targetTime >> 32, uint32_t(timing.targetTime), timing.flags);
+          }
+        } else if (pPresentTimes && pPresentTimes->pTimes) {
+          assert(pPresentTimes->swapchainCount == presentInfo.swapchainCount);
+
+#if GAMESCOPE_WSI_DISPLAY_TIMING_DEBUG
+          fprintf(stderr, "[Gamescope WSI] QueuePresentKHR: presentID: %u - desiredPresentTime: %lu - now: %lu\n", pPresentTimes->pTimes[i].presentID, pPresentTimes->pTimes[i].desiredPresentTime, getTimeMonotonic());
+#endif
+          gamescope_swapchain_set_present_time(swapchain->object, pPresentTimes->pTimes[i].presentID,
+            pPresentTimes->pTimes[i].desiredPresentTime >> 32, uint32_t(pPresentTimes->pTimes[i].desiredPresentTime));
+        }
+      }
+
+      // The driver's swapchains were created without the timing flag.
+      ChainRemoval<VkPresentTimingsInfoEXT> removeTiming(&presentInfo);
 
       // All VkSurfaceKHR's come from the same VkInstance, so we only need to check one surface.
       bool frameLimiterAware = [&]() {
@@ -1596,21 +2030,6 @@ namespace GamescopeWSILayer {
       if (allLayer || oOriginalPresentModeInfo)
         presentInfo.pNext = &driverModeInfo;
 
-      if (!display) {
-        static bool s_warned = false;
-        if (!s_warned) {
-          int messageId = -1;
-          messagey::ShowSimple(
-            "QueuePresentKHR: Attempting to present to a non-hooked swapchain.\nHooking has failed somewhere!\nYou may have a bad Vulkan layer interfering.\nPress OK to try to power through this error, or Cancel to stop.",
-            "Gamescope WSI Layer Error",
-            messagey::MessageBoxFlag::Warning | messagey::MessageBoxFlag::Simple_Cancel | messagey::MessageBoxFlag::Simple_OK,
-            &messageId);
-          if (messageId == 0) // Cancel
-            abort();
-          s_warned = true;
-        }
-      }
-
       // After the pump, so the state reflects events received this frame.
       bool forceFifo = [&]() {
         for (uint32_t i = 0; i < presentInfo.swapchainCount; i++) {
@@ -1637,19 +2056,32 @@ namespace GamescopeWSILayer {
         }
       }
 
+      std::vector<VkResult> driverResults(presentInfo.swapchainCount, VK_SUCCESS);
+      if (!presentInfo.pResults)
+        presentInfo.pResults = driverResults.data();
       VkResult result = pDispatch.QueuePresentKHR(queue, &presentInfo);
+      const bool driverFailed = result < VK_SUCCESS;
 
       for (uint32_t i = 0; i < presentInfo.swapchainCount; i++) {
         VkSwapchainKHR swapchain = presentInfo.pSwapchains[i];
 
+        const bool swapchainDriverFailed = presentInfo.pResults[i] < VK_SUCCESS;
         auto UpdateSwapchainResult = [&](VkResult newResult) {
-          if (presentInfo.pResults && presentInfo.pResults[i] >= VK_SUCCESS)
-            presentInfo.pResults[i] = newResult;
-          if (result >= VK_SUCCESS)
-            result = newResult;
+          if (!swapchainDriverFailed)
+            presentInfo.pResults[i] = MergePresentResults(presentInfo.pResults[i], newResult);
+          if (!driverFailed)
+            result = MergePresentResults(result, newResult);
         };
 
         if (auto gamescopeSwapchain = gamescopeSwapchains.find(swapchain)) {
+          if (timingArmed[i] && presentInfo.pResults[i] < VK_SUCCESS)
+            gamescope_swapchain_set_present_timing(gamescopeSwapchain->object, 0, 0, 0, 0, 0);
+          if (timingSerials[i] && presentInfo.pResults[i] < VK_SUCCESS) {
+            std::lock_guard lock(*gamescopeSwapchain->presentTimingMutex);
+            gamescopeSwapchain->timingQueue.complete(timingSerials[i], 0, 0, 0);
+          }
+          if (timingResults[i] != VK_SUCCESS)
+            UpdateSwapchainResult(timingResults[i]);
           // If we are a frame limiter aware application like DXVK or VKD3D-Proton, we don't
           // transparently change their vkQueuePresent to just FIFO modes, we change what is
           // exposed as supported in order for them to handle presentation latency like they
@@ -1732,6 +2164,65 @@ namespace GamescopeWSILayer {
           fprintf(stderr, "                                  maxContentLightLevel: %g nits\n", metadata.maxContentLightLevel);
           fprintf(stderr, "                                  maxFrameAverageLightLevel: %g nits\n", metadata.maxFrameAverageLightLevel);
       }
+    }
+
+    static VkResult SetSwapchainPresentTimingQueueSizeEXT(
+      const vkroots::VkDeviceDispatch &dispatch, VkDevice device, VkSwapchainKHR swapchain, uint32_t size) {
+      auto state = gamescopeSwapchains.find(swapchain);
+      if (!state)
+        return dispatch.SetSwapchainPresentTimingQueueSizeEXT(device, swapchain, size);
+      // A report read now frees a slot, and the spec allows no error here.
+      waylandPumpEvents(state->display, state->eventQueue, !state->isWayland);
+      std::lock_guard lock(*state->presentTimingMutex);
+      return state->timingQueue.setSize(size);
+    }
+
+    static VkResult GetSwapchainTimingPropertiesEXT(
+      const vkroots::VkDeviceDispatch &dispatch, VkDevice device, VkSwapchainKHR swapchain,
+      VkSwapchainTimingPropertiesEXT *properties, uint64_t *counter) {
+      auto state = gamescopeSwapchains.find(swapchain);
+      if (!state)
+        return dispatch.GetSwapchainTimingPropertiesEXT(device, swapchain, properties, counter);
+      if (waylandPumpEvents(state->display, state->eventQueue, !state->isWayland) < 0)
+        return VK_ERROR_SURFACE_LOST_KHR;
+      std::lock_guard lock(*state->presentTimingMutex);
+      return state->timingQueue.getTimingProperties(properties, counter);
+    }
+
+    static VkResult GetSwapchainTimeDomainPropertiesEXT(
+      const vkroots::VkDeviceDispatch &dispatch, VkDevice device, VkSwapchainKHR swapchain,
+      VkSwapchainTimeDomainPropertiesEXT *properties, uint64_t *counter) {
+      auto state = gamescopeSwapchains.find(swapchain);
+      if (!state)
+        return dispatch.GetSwapchainTimeDomainPropertiesEXT(device, swapchain, properties, counter);
+      std::lock_guard lock(*state->presentTimingMutex);
+      return state->timingQueue.getTimeDomainProperties(properties, counter);
+    }
+
+    static VkResult GetPastPresentationTimingEXT(
+      const vkroots::VkDeviceDispatch &dispatch, VkDevice device,
+      const VkPastPresentationTimingInfoEXT *info, VkPastPresentationTimingPropertiesEXT *properties) {
+      auto state = gamescopeSwapchains.find(info->swapchain);
+      if (!state)
+        return dispatch.GetPastPresentationTimingEXT(device, info, properties);
+      if (waylandPumpEvents(state->display, state->eventQueue, !state->isWayland) < 0)
+        return VK_ERROR_SURFACE_LOST_KHR;
+      std::lock_guard lock(*state->presentTimingMutex);
+      return state->timingQueue.getPast(info, properties);
+    }
+
+    static VkResult GetCalibratedTimestampsKHR(
+      const vkroots::VkDeviceDispatch &dispatch, VkDevice device, uint32_t count,
+      const VkCalibratedTimestampInfoKHR *infos, uint64_t *timestamps, uint64_t *maxDeviation) {
+      return calibratePresentTimestamps(std::bind_front(&vkroots::VkDeviceDispatch::GetCalibratedTimestampsKHR, &dispatch),
+        device, count, infos, timestamps, maxDeviation);
+    }
+
+    static VkResult GetCalibratedTimestampsEXT(
+      const vkroots::VkDeviceDispatch &dispatch, VkDevice device, uint32_t count,
+      const VkCalibratedTimestampInfoKHR *infos, uint64_t *timestamps, uint64_t *maxDeviation) {
+      return calibratePresentTimestamps(std::bind_front(&vkroots::VkDeviceDispatch::GetCalibratedTimestampsEXT, &dispatch),
+        device, count, infos, timestamps, maxDeviation);
     }
 
     static VkResult GetPastPresentationTimingGOOGLE(
