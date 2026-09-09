@@ -472,6 +472,7 @@ namespace GamescopeWSILayer {
 
   struct GamescopeInstanceData {
     wl_display* display;
+    GamescopeWaylandObjects waylandObjects;
     uint32_t appId = 0;
     std::string engineName;
     GamescopeLayerClient::Flags flags = 0;
@@ -731,6 +732,16 @@ namespace GamescopeWSILayer {
         }
       }
       
+      GamescopeWaylandObjects waylandObjects = GamescopeWaylandObjects::get(display);
+      if (!waylandObjects.valid()) {
+        waylandObjects.limiterState.reset();
+        if (waylandObjects.gamescopeSwapchainFactory)
+          gamescope_swapchain_factory_v2_destroy(waylandObjects.gamescopeSwapchainFactory);
+        if (waylandObjects.compositor)
+          wl_compositor_destroy(waylandObjects.compositor);
+        wl_display_disconnect(display);
+        return result;
+      }
       {
         uint32_t appId = clientAppId();
 
@@ -740,6 +751,7 @@ namespace GamescopeWSILayer {
 
         auto state = gamescopeInstances.create(*pInstance, GamescopeInstanceData {
           .display = display,
+          .waylandObjects = waylandObjects,
           .appId   = appId,
           .engineName = engineName,
           .flags   = defaultLayerClientFlags(pCreateInfo->pApplicationInfo, appId),
@@ -763,6 +775,11 @@ namespace GamescopeWSILayer {
             VkInstance                   instance,
       const VkAllocationCallbacks*       pAllocator) {
       if (auto state = gamescopeInstances.find(instance)) {
+        state->waylandObjects.limiterState.reset();
+        if (state->waylandObjects.gamescopeSwapchainFactory)
+          gamescope_swapchain_factory_v2_destroy(state->waylandObjects.gamescopeSwapchainFactory);
+        if (state->waylandObjects.compositor)
+          wl_compositor_destroy(state->waylandObjects.compositor);
         wl_display_disconnect(state->display);
       }
       gamescopeInstances.erase(instance);
@@ -1112,7 +1129,7 @@ namespace GamescopeWSILayer {
             VkSurfaceKHR*                pSurface) {
       fprintf(stderr, "[Gamescope WSI] Creating Gamescope surface: xid: 0x%x\n", window);
 
-      GamescopeWaylandObjects waylandObjects = GamescopeWaylandObjects::get(gamescopeInstance->display);
+      GamescopeWaylandObjects waylandObjects = gamescopeInstance->waylandObjects;
       if (!waylandObjects.valid()) {
         fprintf(stderr, "[Gamescope WSI] Failed to get Wayland objects\n");
         return VK_ERROR_SURFACE_LOST_KHR;
