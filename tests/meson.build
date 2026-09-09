@@ -10,7 +10,7 @@ gamescope_tests = executable(
 	'gamescope_tests',
 	unittest_src + ['test_convar.cpp', 'test_focus_placement.cpp', 'test_mangoapp_config.cpp', 'test_mangoapp_control.cpp', 'test_present_timing_schedule.cpp', 'test_process.cpp', 'test_upscale.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_vrclient_detect.cpp'],
 	include_directories: [srcdir, sol2_include],
-	dependencies: [catch2_dep, luajit_dep, cap_dep, drm_dep, glm_dep, wlroots_dep],
+	dependencies: [catch2_dep, luajit_dep, cap_dep, drm_dep, glm_dep, vulkan_dep, wlroots_dep],
 	cpp_args: gamescope_cpp_args,
 )
 
