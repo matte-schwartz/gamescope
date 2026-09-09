@@ -51,42 +51,38 @@ namespace GamescopeWSILayer {
     return std::ranges::any_of(vec, std::bind_front(std::equal_to{}, lookupValue));
   }
 
-  static int waylandPumpEvents(wl_display *display) {
-    int wlFd = wl_display_get_fd(display);
-
-    while (true) {
-      int ret = 0;
-
-      if ((ret = wl_display_dispatch_pending(display)) < 0)
-        return ret;
-
-      if ((ret = wl_display_prepare_read(display)) < 0) {
-        if (errno == EAGAIN)
+  // The default queue carries the limiter on the layer's display, but on a
+  // native Wayland client's display it carries the client's own handlers.
+  static int waylandPumpEvents(wl_display *display, wl_event_queue *queue, bool ownDisplay) {
+    const int wlFd = wl_display_get_fd(display);
+    for (;;) {
+      if (ownDisplay && wl_display_dispatch_pending(display) < 0)
+        return -1;
+      if (wl_display_dispatch_queue_pending(display, queue) < 0)
+        return -1;
+      if (wl_display_prepare_read_queue(display, queue) < 0) {
+        if (errno == EAGAIN || errno == EINTR)
           continue;
-
         return -1;
       }
-
-      pollfd pollfd = {
-        .fd = wlFd,
-        .events = POLLIN,
-      };
+      pollfd fd = { .fd = wlFd, .events = POLLIN };
       timespec zeroTimeout = {};
-      ret = ppoll(&pollfd, 1, &zeroTimeout, NULL);
-
+      int ret = ppoll(&fd, 1, &zeroTimeout, nullptr);
       if (ret <= 0) {
+        const int error = errno;
         wl_display_cancel_read(display);
-        if (ret == 0)
-          wl_display_flush(display);
+        if (ret < 0 && error == EINTR)
+          continue;
+        if (ret == 0) {
+          ret = wl_display_flush(display);
+          if (ret < 0 && errno == EAGAIN)
+            return 0;
+        }
         return ret;
       }
-
-      ret = wl_display_read_events(display);
-      if (ret < 0)
-        return ret;
-
-      ret = wl_display_flush(display);
-      return ret;
+      if (wl_display_read_events(display) < 0)
+        return -1;
+      // Dispatch everything just read before deciding there is nothing left.
     }
   }
 
@@ -614,6 +610,7 @@ namespace GamescopeWSILayer {
   struct GamescopeSwapchainData {
     gamescope_swapchain *object;
     wl_display* display;
+    wl_event_queue *eventQueue;
     VkSurfaceKHR surface; // Always the Gamescope Surface surface -- so the Wayland one.
     bool isWayland;
     bool isBypassingXWayland;
@@ -622,7 +619,7 @@ namespace GamescopeWSILayer {
     VkExtent2D extent;
     uint32_t serverId = 0;
     bool isHdrColorspace = false;
-    bool retired = false;
+    std::unique_ptr<std::atomic<bool>> retired = std::make_unique<std::atomic<bool>>(false);
 
     std::unique_ptr<std::mutex> presentTimingMutex = std::make_unique<std::mutex>();
     std::vector<VkPastPresentationTimingGOOGLE> pastPresentTimings;
@@ -674,7 +671,7 @@ namespace GamescopeWSILayer {
             gamescope_swapchain *object) {
       GamescopeSwapchainData *swapchain = reinterpret_cast<GamescopeSwapchainData*>(data);
       {
-        swapchain->retired = true;
+        *swapchain->retired = true;
       }
       fprintf(stderr, "[Gamescope WSI] Swapchain retired\n");
     },
@@ -1236,6 +1233,7 @@ namespace GamescopeWSILayer {
       const VkAllocationCallbacks*     pAllocator) {
       if (auto state = gamescopeSwapchains.find(swapchain)) {
         gamescope_swapchain_destroy(state->object);
+        wl_event_queue_destroy(state->eventQueue);
       }
       gamescopeSwapchains.erase(swapchain);
       fprintf(stderr, "[Gamescope WSI] Destroying swapchain: %p\n", reinterpret_cast<void*>(swapchain));
@@ -1277,7 +1275,7 @@ namespace GamescopeWSILayer {
 
       if (pCreateInfo->oldSwapchain) {
         if (auto gamescopeSwapchain = gamescopeSwapchains.find(pCreateInfo->oldSwapchain)) {
-          gamescopeSwapchain->retired = true;
+          *gamescopeSwapchain->retired = true;
           // If we are going to/from being able to bypass XWayland, make sure
           // we NULL out oldSwapchain, as they'll be for different surfaces and swapchain types.
           if (gamescopeSwapchain->isBypassingXWayland != canBypass)
@@ -1381,14 +1379,28 @@ namespace GamescopeWSILayer {
         return result;
       }
 
+      wl_event_queue *eventQueue = wl_display_create_queue(gamescopeSurface->display);
+      auto *factory = static_cast<gamescope_swapchain_factory_v2 *>(
+        wl_proxy_create_wrapper(gamescopeSurface->waylandObjects.gamescopeSwapchainFactory));
+      if (!eventQueue || !factory) {
+        if (factory)
+          wl_proxy_wrapper_destroy(factory);
+        if (eventQueue)
+          wl_event_queue_destroy(eventQueue);
+        pDispatch.DestroySwapchainKHR(device, *pSwapchain, pAllocator);
+        *pSwapchain = VK_NULL_HANDLE;
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(factory), eventQueue);
       gamescope_swapchain *gamescopeSwapchainObject = gamescope_swapchain_factory_v2_create_swapchain(
-        gamescopeSurface->waylandObjects.gamescopeSwapchainFactory,
-        gamescopeSurface->surface);
+        factory, gamescopeSurface->surface);
+      wl_proxy_wrapper_destroy(factory);
 
       {
         auto gamescopeSwapchain = gamescopeSwapchains.create(*pSwapchain, GamescopeSwapchainData{
           .object              = gamescopeSwapchainObject,
           .display             = gamescopeSurface->display,
+          .eventQueue          = eventQueue,
           .surface             = pCreateInfo->surface, // Always the Wayland side surface.
           .isWayland           = gamescopeSurface->isWayland(),
           .isBypassingXWayland = canBypass,
@@ -1400,6 +1412,7 @@ namespace GamescopeWSILayer {
         });
         if (!gamescopeSwapchain) {
           gamescope_swapchain_destroy(gamescopeSwapchainObject);
+          wl_event_queue_destroy(eventQueue);
           pDispatch.DestroySwapchainKHR(device, *pSwapchain, pAllocator);
           *pSwapchain = VK_NULL_HANDLE;
           return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -1456,7 +1469,7 @@ namespace GamescopeWSILayer {
       const VkAcquireNextImageInfoKHR* pAcquireInfo,
             uint32_t*                  pImageIndex) {
       if (auto gamescopeSwapchain = gamescopeSwapchains.find(pAcquireInfo->swapchain)) {
-        if (gamescopeSwapchain->retired)
+        if (*gamescopeSwapchain->retired)
           return VK_ERROR_OUT_OF_DATE_KHR;
       }
 
@@ -1521,7 +1534,9 @@ namespace GamescopeWSILayer {
       wl_display *display = nullptr;
       for (uint32_t i = 0; i < presentInfo.swapchainCount; i++) {
         if (auto gamescopeSwapchain = gamescopeSwapchains.find(presentInfo.pSwapchains[i])) {
-          if (gamescopeSwapchain->retired) {
+          if (waylandPumpEvents(gamescopeSwapchain->display, gamescopeSwapchain->eventQueue, !gamescopeSwapchain->isWayland) < 0)
+            return PresentRetiredSwapchain(pDispatch, queue, pPresentInfo);
+          if (*gamescopeSwapchain->retired) {
             return PresentRetiredSwapchain(pDispatch, queue, pPresentInfo);
           }
 
@@ -1581,9 +1596,7 @@ namespace GamescopeWSILayer {
       if (allLayer || oOriginalPresentModeInfo)
         presentInfo.pNext = &driverModeInfo;
 
-      if (display) {
-        waylandPumpEvents(display);
-      } else {
+      if (!display) {
         static bool s_warned = false;
         if (!s_warned) {
           int messageId = -1;
@@ -1734,7 +1747,7 @@ namespace GamescopeWSILayer {
       }
 
       // Dispatch to get the latest timings.
-      if (waylandPumpEvents(gamescopeSwapchain->display) < 0)
+      if (waylandPumpEvents(gamescopeSwapchain->display, gamescopeSwapchain->eventQueue, !gamescopeSwapchain->isWayland) < 0)
         return VK_ERROR_SURFACE_LOST_KHR;
 
       std::unique_lock lock(*gamescopeSwapchain->presentTimingMutex);
@@ -1760,7 +1773,7 @@ namespace GamescopeWSILayer {
       }
 
       // Dispatch to get the latest cycle.
-      if (waylandPumpEvents(gamescopeSwapchain->display) < 0)
+      if (waylandPumpEvents(gamescopeSwapchain->display, gamescopeSwapchain->eventQueue, !gamescopeSwapchain->isWayland) < 0)
         return VK_ERROR_SURFACE_LOST_KHR;
 
       std::unique_lock lock(*gamescopeSwapchain->presentTimingMutex);
