@@ -1027,7 +1027,7 @@ struct global_focus_t : public focus_t
 	std::array< BaseLayerInfo_t, HELD_COMMIT_COUNT > CachedPlanes = {};
 	unsigned int uFadeOutStartTime = 0;
 	bool bPendingFade = false;
-	bool bFSRActive = false;
+	GamescopeUpscaleFilter eActiveUpscaler = GamescopeUpscaleFilter::LINEAR;
 	uint64_t ulBasePlaneCommitID = 0;
 	uint32_t uBasePlaneAppID = 0;
 	bool bBasePlaneIsFifo = false;
@@ -1242,7 +1242,10 @@ gamescope::ConCommand cc_debug_set_fps_limit( "debug_set_fps_limit", "Set refres
 
 static int g_nRuntimeInfoFd = -1;
 
-bool g_bFSRActive = false;
+// The shader upscaler that produced the base layer, LINEAR when none did.
+GamescopeUpscaleFilter g_eActiveUpscaler = GamescopeUpscaleFilter::LINEAR;
+GamescopeUpscaleFilter g_eWantedUpscaler = GamescopeUpscaleFilter::LINEAR;
+int g_nActiveUpscaleSharpness = 0;
 
 BlurMode g_BlurMode = BLUR_MODE_OFF;
 BlurMode g_BlurModeOld = BLUR_MODE_OFF;
@@ -3329,10 +3332,29 @@ paint_all( global_focus_t *pFocus, bool async )
 		frameInfo.useNISLayer0 = false;
 	}
 
-	pFocus->bFSRActive = frameInfo.useFSRLayer0;
-	if ( const auto& heldCommit = pFocus->HeldCommits[HELD_COMMIT_BASE]; heldCommit && heldCommit->upscaledTexture ) {
-		pFocus->bFSRActive = ( heldCommit->upscaledTexture->eFilter == GamescopeUpscaleFilter::FSR );
+	pFocus->eActiveUpscaler = GamescopeUpscaleFilter::LINEAR;
+	if ( frameInfo.useFSRLayer0 )
+		pFocus->eActiveUpscaler = GamescopeUpscaleFilter::FSR;
+	else if ( frameInfo.useNISLayer0 )
+		pFocus->eActiveUpscaler = GamescopeUpscaleFilter::NIS;
+	// A full blur draws layer 0 from the blurred image, so its filter never runs.
+	else if ( frameInfo.layers.count() && !frameInfo.layers.get( 0 ).isScreenSize() && frameInfo.blurLayer0 != BLUR_MODE_ALWAYS )
+	{
+		// The filters that run inside the composite sample.
+		switch ( frameInfo.layers.get( 0 ).filter )
+		{
+			case GamescopeUpscaleFilter::NEAREST:
+			case GamescopeUpscaleFilter::PIXEL:
+			case GamescopeUpscaleFilter::SGSR:
+				pFocus->eActiveUpscaler = frameInfo.layers.get( 0 ).filter;
+				break;
+			default:
+				break;
+		}
 	}
+	if ( const auto& heldCommit = pFocus->HeldCommits[HELD_COMMIT_BASE];
+		 heldCommit && heldCommit->upscaledTexture && frameInfo.layers.count() && frameInfo.layers.get( 0 ).tex == heldCommit->upscaledTexture->pTexture )
+		pFocus->eActiveUpscaler = heldCommit->upscaledTexture->eFilter;
 
 	g_bFirstFrame = false;
 
@@ -9539,7 +9561,9 @@ static void publish_mangoapp_snapshot()
 	if ( !pFocus )
 		return;
 
-	g_bFSRActive = pFocus->bFSRActive;
+	g_eActiveUpscaler = pFocus->eActiveUpscaler;
+	g_eWantedUpscaler = pFocus->eUpscaleFilter;
+	g_nActiveUpscaleSharpness = pFocus->nUpscaleSharpness;
 	focusWindow_pid = pFocus->nFocusWindowPid;
 	focusWindow_engine = pFocus->pFocusWindowEngine;
 	g_uCurrentBasePlaneCommitID = pFocus->ulBasePlaneCommitID;
@@ -9564,8 +9588,9 @@ static void publish_mangoapp_connector_snapshots()
 		snapshots[ uMsgType ] = MangoappSnapshot_t
 		{
 			.nPid = pFocus->nFocusWindowPid,
-			.bFSRActive = pFocus->bFSRActive,
-			.uFSRSharpness = (uint8_t) g_upscaleFilterSharpness,
+			.eActiveUpscaler = pFocus->eActiveUpscaler,
+			.eWantedUpscaler = pFocus->eUpscaleFilter,
+			.uFSRSharpness = (uint8_t) pFocus->nUpscaleSharpness,
 			.pEngineName = pFocus->pFocusWindowEngine,
 			.bSteamFocused = window_is_steam( pFocus->inputFocusWindow ),
 			.bAppWantsHDR = g_bAppWantsHDRCached,
@@ -9914,13 +9939,13 @@ steamcompmgr_main(int argc, char **argv)
 			flush_root = true;
 		}
 
-		if ( g_bFSRActive != g_bWasFSRActive )
+		if ( const bool bFSRActive = g_eActiveUpscaler == GamescopeUpscaleFilter::FSR; bFSRActive != g_bWasFSRActive )
 		{
-			uint32_t active = g_bFSRActive ? 1 : 0;
+			uint32_t active = bFSRActive ? 1 : 0;
 			XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFSRFeedback, XA_CARDINAL, 32, PropModeReplace,
 					(unsigned char *)&active, 1 );
 
-			g_bWasFSRActive = g_bFSRActive;
+			g_bWasFSRActive = bFSRActive;
 			flush_root = true;
 		}
 

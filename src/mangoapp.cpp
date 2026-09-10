@@ -41,9 +41,34 @@ struct mangoapp_msg_v1 {
     bool bAppWantsHDR : 1;
     bool bSteamFocused : 1;
     char engineName[40];
+    uint8_t upscaler; // mangoapp_upscaler, the one that produced the frame
+    uint8_t wantedUpscaler; // mangoapp_upscaler, the one selected
 
     // WARNING: Always ADD fields, never remove or repurpose fields
 } __attribute__((packed));
+
+// fsrUpscale predates other shader upscalers, so this names the one in use.
+enum mangoapp_upscaler : uint8_t {
+    MANGOAPP_UPSCALER_NONE = 0,
+    MANGOAPP_UPSCALER_FSR = 1,
+    MANGOAPP_UPSCALER_NIS = 2,
+    MANGOAPP_UPSCALER_SGSR = 3,
+    MANGOAPP_UPSCALER_NEAREST = 4,
+    MANGOAPP_UPSCALER_PIXEL = 5,
+};
+
+static mangoapp_upscaler mangoapp_upscaler_for_filter( GamescopeUpscaleFilter eFilter )
+{
+    switch ( eFilter )
+    {
+        case GamescopeUpscaleFilter::FSR:  return MANGOAPP_UPSCALER_FSR;
+        case GamescopeUpscaleFilter::NIS:  return MANGOAPP_UPSCALER_NIS;
+        case GamescopeUpscaleFilter::SGSR: return MANGOAPP_UPSCALER_SGSR;
+        case GamescopeUpscaleFilter::NEAREST: return MANGOAPP_UPSCALER_NEAREST;
+        case GamescopeUpscaleFilter::PIXEL: return MANGOAPP_UPSCALER_PIXEL;
+        default:                           return MANGOAPP_UPSCALER_NONE;
+    }
+}
 
 void init_mangoapp(){
     int key = ftok("mangoapp", 65);
@@ -194,8 +219,9 @@ void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uin
     MangoappSnapshot_t snapshot;
     if ( uMsgType == k_uMangoappLegacyMsgType )
     {
-        snapshot.bFSRActive = g_bFSRActive;
-        snapshot.uFSRSharpness = (uint8_t) g_upscaleFilterSharpness;
+        snapshot.eActiveUpscaler = g_eActiveUpscaler;
+        snapshot.eWantedUpscaler = g_eWantedUpscaler;
+        snapshot.uFSRSharpness = (uint8_t) g_nActiveUpscaleSharpness;
         snapshot.nPid = focusWindow_pid;
         snapshot.uOutputWidth = g_nOutputWidth;
         snapshot.uOutputHeight = g_nOutputHeight;
@@ -219,7 +245,9 @@ void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uin
     msg.visible_frametime_ns = visible_frametime;
     msg.app_frametime_ns = app_frametime_ns;
     msg.latency_ns = latency_ns;
-    msg.fsrUpscale = snapshot.bFSRActive;
+    msg.fsrUpscale = snapshot.eActiveUpscaler == GamescopeUpscaleFilter::FSR;
+    msg.upscaler = mangoapp_upscaler_for_filter( snapshot.eActiveUpscaler );
+    msg.wantedUpscaler = mangoapp_upscaler_for_filter( snapshot.eWantedUpscaler );
     msg.fsrSharpness = snapshot.uFSRSharpness;
     msg.pid = snapshot.nPid;
     msg.outputWidth = snapshot.uOutputWidth;
