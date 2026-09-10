@@ -1,5 +1,6 @@
 #include <vector>
 #include <memory>
+#include <cmath>
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include <linux/input-event-codes.h>
@@ -2430,6 +2431,7 @@ namespace gamescope
     {
         if ( pLayer && pLayer->tex )
         {
+            // Round away reciprocal-scale error instead of truncating an edge pixel.
             Present(
                 OpenVRPlaneState
                 {
@@ -2440,8 +2442,8 @@ namespace gamescope
                     .flSrcY      = 0.0,
                     .flSrcWidth  = double( pLayer->tex->width() ),
                     .flSrcHeight = double( pLayer->tex->height() ),
-                    .nDstWidth   = int32_t( pLayer->tex->width() / double( pLayer->scale.x ) ),
-                    .nDstHeight  = int32_t( pLayer->tex->height() / double( pLayer->scale.y ) ),
+                    .nDstWidth   = int32_t( std::lround( pLayer->tex->width() / double( pLayer->scale.x ) ) ),
+                    .nDstHeight  = int32_t( std::lround( pLayer->tex->height() / double( pLayer->scale.y ) ) ),
                     .eColorspace = pLayer->colorspace,
                     .bOpaque     = pLayer->zpos == g_zposBase && !cv_vr_transparent_backing,
                     .bCursor     = pLayer->zpos == g_zposCursor,
