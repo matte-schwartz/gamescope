@@ -3799,12 +3799,14 @@ struct BlitPushData_t
     float u_itmTargetNits; // unset
 
 	uint32_t u_rotation;
+	float u_sgsrSharpness;
 
 	explicit BlitPushData_t(const struct FrameInfo_t *frameInfo, uint32_t rotation = 0)
 	{
 		u_shaderFilter = 0;
 		u_alphaMode = 0;
 		u_rotation = rotation;
+		u_sgsrSharpness = GetSgsrSharpness( frameInfo->nUpscaleSharpness );
 
 		for (int i = 0; i < frameInfo->layers.count(); i++) {
 			const FrameInfo_t::Layer_t *layer = &frameInfo->layers.get( i );
@@ -3850,6 +3852,7 @@ struct BlitPushData_t
         u_shaderFilter = (uint32_t)GamescopeUpscaleFilter::LINEAR;
 		u_alphaMode = 0;
 		u_rotation = 0;
+		u_sgsrSharpness = 1.0f;
 		ctm[0] = glm::mat3x4
 		{
 			1, 0, 0, 0,
@@ -3937,12 +3940,14 @@ struct RcasPushData_t
     float u_itmTargetNits; // unset
 
 	uint32_t u_rotation;
+	float u_sgsrSharpness;
 
 	RcasPushData_t(const struct FrameInfo_t *frameInfo, float sharpness, uint32_t rotation = 0)
 	{
 		uvec4_t tmp;
 		FsrRcasCon(&tmp.x, sharpness);
 		u_rotation = rotation;
+		u_sgsrSharpness = GetSgsrSharpness( frameInfo->nUpscaleSharpness );
 		u_layer0Offset.x = uint32_t(int32_t(frameInfo->layers.get( 0 ).offset.x));
 		u_layer0Offset.y = uint32_t(int32_t(frameInfo->layers.get( 0 ).offset.y));
 		u_borderMask = frameInfo->borderMask() >> 1u;
@@ -4016,14 +4021,15 @@ void bind_all_layers(CVulkanCmdBuffer* cmdBuffer, const struct FrameInfo_t *fram
 	{
 		const FrameInfo_t::Layer_t *layer = &frameInfo->layers.get( i );
 
+		bool sgsr = layer->filter == GamescopeUpscaleFilter::SGSR && !layer->isScreenSize();
 		bool nearest = layer->isScreenSize()
                     || layer->filter == GamescopeUpscaleFilter::NEAREST
                     || (layer->filter == GamescopeUpscaleFilter::LINEAR && !layer->viewConvertsToLinearAutomatically());
 
 		cmdBuffer->bindTexture(i, layer->tex);
-		cmdBuffer->setTextureSrgb(i, layer->colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR);
+		cmdBuffer->setTextureSrgb(i, sgsr || layer->colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR);
 		cmdBuffer->setSamplerNearest(i, nearest);
-		cmdBuffer->setSamplerUnnormalized(i, true);
+		cmdBuffer->setSamplerUnnormalized(i, !sgsr);
 	}
 	for (uint32_t i = frameInfo->layers.count(); i < VKR_SAMPLER_SLOTS; i++)
 	{

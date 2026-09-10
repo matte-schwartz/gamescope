@@ -44,6 +44,7 @@
       <entry name="mura_correction" value="5"/>
       <entry name="look" value="6"/>
       <entry name="perf_query" value="7"/>
+      <entry name="sgsr_filter" value="8"/>
     </enum>
 
     <event name="feature_support">

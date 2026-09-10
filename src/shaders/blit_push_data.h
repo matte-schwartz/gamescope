@@ -18,5 +18,6 @@ uniform layers_t {
     float u_itmTargetNits;
 
     uint u_rotation;
+    float u_sgsrSharpness;
 };
 

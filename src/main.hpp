@@ -2,7 +2,11 @@
 
 #include <getopt.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+
+#include "gamescope_shared.h"
 
 extern const char *gamescope_optstring;
 extern const struct option *gamescope_options;
@@ -39,13 +43,38 @@ enum class GamescopeUpscaleFilter : uint32_t
     FSR,
     NIS,
     PIXEL,
+    SGSR,
 
     FROM_VIEW = 0xF, // internal
 };
 
 static constexpr bool UpscaleFilterUsesSharpness( GamescopeUpscaleFilter eFilter )
 {
-    return eFilter == GamescopeUpscaleFilter::FSR || eFilter == GamescopeUpscaleFilter::NIS;
+    return eFilter == GamescopeUpscaleFilter::FSR ||
+           eFilter == GamescopeUpscaleFilter::NIS ||
+           eFilter == GamescopeUpscaleFilter::SGSR;
+}
+
+// Strength halves every 2.5 notches so Steam's six notches span the range
+// and the CLI tail fades SGSR out to plain bilinear. The top sits above the
+// reference's 1.0 since that still reads softer than FSR at its maximum.
+static inline float GetSgsrSharpness( int nSharpness )
+{
+    return 1.5f * std::exp2( -float( std::clamp( nSharpness, 0, 20 ) ) / 2.5f );
+}
+
+// Scale is output pixels per source pixel. SGSR only supports opaque SDR RGB magnification.
+// Exact compares are deliberate, the push data treats near-1 scales as screen size anyway.
+static constexpr GamescopeUpscaleFilter GetEffectiveUpscaleFilter(
+    GamescopeUpscaleFilter eFilter, GamescopeAppTextureColorspace eColorspace,
+    bool bYcbcr, bool bHasAlpha, float flScaleX, float flScaleY )
+{
+    if ( eFilter == GamescopeUpscaleFilter::SGSR &&
+         ( ( eColorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR && eColorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB ) ||
+           bYcbcr || bHasAlpha || flScaleX < 1.0f || flScaleY < 1.0f || ( flScaleX == 1.0f && flScaleY == 1.0f ) ) )
+        return GamescopeUpscaleFilter::LINEAR;
+
+    return eFilter;
 }
 
 static constexpr bool DoesHardwareSupportUpscaleFilter( GamescopeUpscaleFilter eFilter )

@@ -146,5 +146,8 @@ bool commit_t::ShouldPreemptivelyUpscale( GamescopeUpscaleFilter eFilter, Gamesc
     // It should also return a std::pair or a glm uvec
     calc_scale_factor( eScaler, flScaleX, flScaleY, vulkanTex->width(), vulkanTex->height() );
 
+    if ( GetEffectiveUpscaleFilter( eFilter, colorspace(), vulkanTex->isYcbcr(), DRMFormatHasAlpha( vulkanTex->drmFormat() ), flScaleX, flScaleY ) != eFilter )
+        return false;
+
     return !close_enough( flScaleX, 1.0f ) || !close_enough( flScaleY, 1.0f );
 }

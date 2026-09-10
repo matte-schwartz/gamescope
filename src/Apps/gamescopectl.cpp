@@ -231,6 +231,8 @@ namespace gamescope
                 return "Look";
             case GAMESCOPE_CONTROL_FEATURE_PERF_QUERY:
                 return "Performance Query";
+            case GAMESCOPE_CONTROL_FEATURE_SGSR_FILTER:
+                return "SGSR Filter";
             default:
                 return "Unknown";
         }

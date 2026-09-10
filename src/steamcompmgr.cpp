@@ -301,7 +301,6 @@ gamescope::ConVar<bool> cv_adaptive_sync_uncapped( "adaptive_sync_uncapped", tru
 
 gamescope::ConVar<bool> cv_upscale_preemptive( "upscale_preemptive", true, "Allow pre-emptive upscaling" );
 gamescope::ConVar<bool> cv_upscale_preemptive_debug_force_sync( "upscale_preemptive_debug_force_sync", false, "Force synchronize pre-emptive upscaling" );
-gamescope::ConVar<bool> cv_hack_remap_sharp_to_fsr( "hack_remap_sharp_to_fsr", true, "HACK: treat unknown scaling filter 5 as FSR" );
 
 uint64_t g_SteamCompMgrLimitedAppRefreshCycle = 16'666'666;
 uint64_t g_SteamCompMgrAppRefreshCycle = 16'666'666;
@@ -2448,6 +2447,10 @@ paint_cached_base_layer(const gamescope::Rc<commit_t>& commit, const BaseLayerIn
 		frameInfo->focusedWindowOffset = { base.windowOffset[0], base.windowOffset[1] };
 	}
 
+	// The cached upscale may be gone, so re-derive SGSR eligibility for the raw image.
+	if ( base.eUpscaleFilter == GamescopeUpscaleFilter::SGSR )
+		layer->filter = GetEffectiveUpscaleFilter( base.eUpscaleFilter, layer->colorspace, layer->isYcbcr(), layer->hasAlpha(), 1.0f / layer->scale.x, 1.0f / layer->scale.y );
+
 	layer->hdr_metadata_blob = nullptr;
 	if (commit->feedback)
 	{
@@ -2657,6 +2660,11 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
 	{
 		layer->zpos = g_zposExternalOverlay;
 	}
+
+	if ( layer->filter == GamescopeUpscaleFilter::SGSR && layer->zpos != g_zposBase )
+		layer->filter = GamescopeUpscaleFilter::LINEAR;
+
+	layer->filter = GetEffectiveUpscaleFilter( layer->filter, layer->colorspace, layer->isYcbcr(), layer->hasAlpha(), currentScaleRatio_x, currentScaleRatio_y );
 
 	layer->hdr_metadata_blob = nullptr;
 	if (lastCommit->feedback)
@@ -7209,16 +7217,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	{
 		uint32_t uScalingFilter = get_prop( ctx, ctx->root, ctx->atoms.gamescopeNewScalingFilter, 0 );
 
-		// HACK: Steam Frame's Sharp option sends 5, which no filter enum
-		// defines. Remap it so the option does something while the wire
-		// mismatch is sorted out with Steam.
-		if ( cv_hack_remap_sharp_to_fsr && uScalingFilter == 5 )
-		{
-			xwm_log.infof( "HACK: remapping scaling filter 5 to FSR" );
-			uScalingFilter = uint32_t( GamescopeUpscaleFilter::FSR );
-		}
-
-		if ( uScalingFilter > uint32_t( GamescopeUpscaleFilter::PIXEL ) )
+		if ( uScalingFilter > uint32_t( GamescopeUpscaleFilter::SGSR ) )
 			xwm_log.errorf( "Unknown scaling filter %u, keeping %u", uScalingFilter, uint32_t( g_wantedUpscaleFilter ) );
 		else if ( g_wantedUpscaleFilter != GamescopeUpscaleFilter( uScalingFilter ) )
 		{

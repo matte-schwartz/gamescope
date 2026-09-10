@@ -2,6 +2,7 @@
 
 #include "shaderfilter.h"
 #include "alphamode.h"
+#include "sgsr1.h"
 
 // Rotate only the final store coordinate (CCW 90-degree steps: 1=90, 2=180,
 // 3=270); the scene stays logical so sampling and blending are unchanged.
@@ -177,17 +178,27 @@ vec4 sampleLayerEx(sampler2D layerSampler, uint offsetLayerIdx, uint colorspaceL
         return vec4(0.0f, 0.0f, 0.0f, border);
     }
 
+    uint layerFilter = get_layer_shaderfilter(offsetLayerIdx);
+    if (layerFilter == filter_sgsr)
+        unnormalized = false;
     if (!unnormalized)
         coord /= texSize;
 
     uint colorspace = get_layer_colorspace(colorspaceLayerIdx);
     vec4 color;
-    if (get_layer_shaderfilter(offsetLayerIdx) == filter_pixel) {
+    if (layerFilter == filter_sgsr) {
+        // SGSR samples encoded SDR, including textures normally decoded by the view.
+        if (colorspace == colorspace_linear)
+            colorspace = colorspace_sRGB;
+        color = sampleSgsr1(layerSampler, coord, u_sgsrSharpness);
+        color.rgb = colorspace_plane_degamma_tf(color.rgb, colorspace);
+    }
+    else if (layerFilter == filter_pixel) {
         vec2 output_res = texSize / u_scale[offsetLayerIdx];
         vec2 extent = max((texSize / output_res), vec2(1.0 / 256.0));
         color = sampleBandLimited(layerSampler, coord, unnormalized ? vec2(1.0f) : texSize, unnormalized ? vec2(1.0f) : vec2(1.0f) / texSize, extent, colorspace, unnormalized);
     }
-    else if (get_layer_shaderfilter(offsetLayerIdx) == filter_linear_emulated) {
+    else if (layerFilter == filter_linear_emulated) {
         color = sampleBilinear(layerSampler, coord, colorspace, unnormalized);
     }
     else {
