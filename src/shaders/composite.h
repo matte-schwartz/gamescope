@@ -21,10 +21,35 @@ ivec2 rotateOutputCoord(uvec2 coord, uint rotation) {
     }
 }
 
-vec4 sampleRegular(sampler2D tex, vec2 coord, uint colorspace) {
-    vec4 color = textureLod(tex, coord, 0);
+bool hasEncodedTransfer(uint colorspace) {
+    return colorspace == colorspace_linear || colorspace == colorspace_sRGB || colorspace == colorspace_pq;
+}
+
+vec4 sampleToLinear(vec4 color, uint colorspace, uint alphaMode) {
+    if (alphaMode == alpha_mode_premult_encoded && hasEncodedTransfer(colorspace) && color.a != 1.0) {
+        if (color.a <= 0.0)
+            return vec4(0.0);
+        // Wayland premultiplies encoded RGB, before our transfer conversion.
+        if (colorspace == colorspace_linear) {
+            color.rgb = linearToSrgb(color.rgb);
+            colorspace = colorspace_sRGB;
+        }
+        color.rgb = colorspace_plane_degamma_tf(color.rgb / color.a, colorspace) * color.a;
+        return color;
+    }
     color.rgb = colorspace_plane_degamma_tf(color.rgb, colorspace);
     return color;
+}
+
+vec4 sampleBilinear(sampler2D tex, vec2 coord, uint colorspace, bool unnormalized, uint alphaMode);
+
+vec4 sampleRegular(sampler2D tex, vec2 coord, uint colorspace, bool unnormalized, uint alphaMode, bool bilinear) {
+    vec4 color = textureLod(tex, coord, 0);
+    // Convert individual translucent taps before interpolation. Opaque taps
+    // can keep hardware filtering, including YCbCr samplers whose alpha is 1.
+    if (bilinear && alphaMode == alpha_mode_premult_encoded && hasEncodedTransfer(colorspace) && color.a > 0.0 && color.a < 1.0)
+        return sampleBilinear(tex, coord, colorspace, unnormalized, alphaMode);
+    return sampleToLinear(color, colorspace, alphaMode);
 }
 
 // To be considered pseudo-bandlimited, upscaling factor must be at least 2x.
@@ -38,7 +63,7 @@ const float bandlimited_PI_half = 0.5 * bandlimited_PI;
 //   For uniform scaling, none of this matters.
 //   extent can be multiplied to achieve LOD bias.
 //   extent must be at least 1.0 / 256.0.
-vec4 sampleBandLimited(sampler2D samp, vec2 uv, vec2 size, vec2 inv_size, vec2 extent, uint colorspace, bool unnormalized)
+vec4 sampleBandLimited(sampler2D samp, vec2 uv, vec2 size, vec2 inv_size, vec2 extent, uint colorspace, bool unnormalized, uint alphaMode)
 {
     // Josh:
     // Clamp to behaviour like 4x scale (0.25).
@@ -58,7 +83,7 @@ vec4 sampleBandLimited(sampler2D samp, vec2 uv, vec2 size, vec2 inv_size, vec2 e
 	vec2 shift = 0.5 + 0.5 * sin(bandlimited_PI_half * clamp((phase - 0.5) / min(extent, vec2(max_extent)), -1.0, 1.0));
 	uv = (base_pixel + 0.5 + shift) * (unnormalized ? vec2(1.0f) : inv_size);
 
-	return sampleRegular(samp, uv, colorspace);
+	return sampleRegular(samp, uv, colorspace, unnormalized, alphaMode, true);
 }
 
 uint pseudo_random(uint seed) {
@@ -134,7 +159,7 @@ vec3 apply_layer_color_mgmt(vec3 color, uint layer, uint colorspace) {
     return color;
 }
 
-vec4 sampleBilinear(sampler2D tex, vec2 coord, uint colorspace, bool unnormalized) {
+vec4 sampleBilinear(sampler2D tex, vec2 coord, uint colorspace, bool unnormalized, uint alphaMode) {
     vec2 scale = unnormalized ? vec2(1.0) : vec2(textureSize(tex, 0));
 
     vec2 pixCoord = coord * scale - 0.5f;
@@ -152,10 +177,10 @@ vec4 sampleBilinear(sampler2D tex, vec2 coord, uint colorspace, bool unnormalize
     vec4 c11 = vec4(red.y, green.y, blue.y, alpha.y);
     vec4 c10 = vec4(red.z, green.z, blue.z, alpha.z);
 
-    c00.rgb = colorspace_plane_degamma_tf(c00.rgb, colorspace);
-    c01.rgb = colorspace_plane_degamma_tf(c01.rgb, colorspace);
-    c11.rgb = colorspace_plane_degamma_tf(c11.rgb, colorspace);
-    c10.rgb = colorspace_plane_degamma_tf(c10.rgb, colorspace);
+    c00 = sampleToLinear(c00, colorspace, alphaMode);
+    c01 = sampleToLinear(c01, colorspace, alphaMode);
+    c11 = sampleToLinear(c11, colorspace, alphaMode);
+    c10 = sampleToLinear(c10, colorspace, alphaMode);
 
     vec2 filterWeight = pixCoord - originPixCoord;
 
@@ -178,7 +203,8 @@ vec4 sampleLayerEx(sampler2D layerSampler, uint offsetLayerIdx, uint colorspaceL
         return vec4(0.0f, 0.0f, 0.0f, border);
     }
 
-    uint layerFilter = get_layer_shaderfilter(offsetLayerIdx);
+    uint layerFilter = get_layer_shaderfilter(colorspaceLayerIdx);
+    uint alphaMode = get_layer_alphamode(colorspaceLayerIdx);
     if (layerFilter == filter_sgsr)
         unnormalized = false;
     if (!unnormalized)
@@ -196,17 +222,27 @@ vec4 sampleLayerEx(sampler2D layerSampler, uint offsetLayerIdx, uint colorspaceL
     else if (layerFilter == filter_pixel) {
         vec2 output_res = texSize / u_scale[offsetLayerIdx];
         vec2 extent = max((texSize / output_res), vec2(1.0 / 256.0));
-        color = sampleBandLimited(layerSampler, coord, unnormalized ? vec2(1.0f) : texSize, unnormalized ? vec2(1.0f) : vec2(1.0f) / texSize, extent, colorspace, unnormalized);
+        color = sampleBandLimited(layerSampler, coord, unnormalized ? vec2(1.0f) : texSize, unnormalized ? vec2(1.0f) : vec2(1.0f) / texSize, extent, colorspace, unnormalized, alphaMode);
     }
     else if (layerFilter == filter_linear_emulated) {
-        color = sampleBilinear(layerSampler, coord, colorspace, unnormalized);
+        color = sampleBilinear(layerSampler, coord, colorspace, unnormalized, alphaMode);
     }
     else {
-        color = sampleRegular(layerSampler, coord, colorspace);
+        color = sampleRegular(layerSampler, coord, colorspace, unnormalized, alphaMode, layerFilter != filter_nearest);
+    }
+    // PASSTHRU includes additive mura maps whose RGB is meaningful at alpha 0.
+    bool reassociate = alphaMode == alpha_mode_premult_encoded && colorspace != colorspace_passthru && color.a != 1.0;
+    if (reassociate) {
+        if (color.a <= 0.0)
+            return vec4(0.0);
+        // Nonlinear LUTs and affine CTMs operate on unassociated colour.
+        color.rgb /= color.a;
     }
     // JoshA: AMDGPU applies 3x4 CTM like this, where A is 1.0, but it only affects .rgb.
     color.rgb = vec4(color.rgb, 1.0f) * u_ctm[colorspaceLayerIdx];
     color.rgb = apply_layer_color_mgmt(color.rgb, offsetLayerIdx, colorspace);
+    if (reassociate)
+        color.rgb *= color.a;
 
     return color;
 }

@@ -41,7 +41,11 @@ void main() {
         outputValue = BlendLayer( i, outputValue, layerColor, u_opacity[i] );
     }
 
-    outputValue.rgb = encodeOutputColor(outputValue.rgb);
+    // Partial overlay composites must retain encoded-premultiplied output.
+    if (get_layer_alphamode(0) == alpha_mode_premult_encoded && outputValue.a != 1.0)
+        outputValue.rgb = outputValue.a > 0.0 ? encodeOutputColor(outputValue.rgb / outputValue.a) * outputValue.a : vec3(0.0);
+    else
+        outputValue.rgb = encodeOutputColor(outputValue.rgb);
     imageStore(dst, rotateOutputCoord(coord, u_rotation), outputValue);
 
     // Indicator to quickly tell if we're in the compositing path or not.

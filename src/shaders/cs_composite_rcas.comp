@@ -92,7 +92,8 @@ void rcasComposite(uvec2 pos)
     }
 
     outputValue = encodeOutputColor(outputValue);
-    imageStore(dst, rotateOutputCoord(pos, u_rotation), vec4(outputValue, 0));
+    // Cached upscales can be sampled again as overlay layers.
+    imageStore(dst, rotateOutputCoord(pos, u_rotation), vec4(outputValue, 1));
 
     if (checkDebugFlag(compositedebug_Markers))
         compositing_debug(pos, u_rotation);
@@ -111,4 +112,3 @@ void main()
     pos.x -= 8u;
     rcasComposite(pos);
 }
-

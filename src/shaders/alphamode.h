@@ -4,6 +4,7 @@
 const int alpha_mode_premult = 0;
 const int alpha_mode_coverage = 1;
 const int alpha_mode_none = 2;
+const int alpha_mode_premult_encoded = 3; // Matches GetShaderAlphaMode.
 
 const int alpha_mode_max_bits = 4;
 
@@ -16,7 +17,7 @@ vec4 BlendLayer( uint layerIdx, vec4 outputValue, vec4 layerColor, float opacity
     float layerAlpha = opacity * layerColor.a;
     
     uint alphaMode = get_layer_alphamode( layerIdx );
-    if ( alphaMode == alpha_mode_premult )
+    if ( alphaMode == alpha_mode_premult || alphaMode == alpha_mode_premult_encoded )
     {
         // wl_surfaces come with premultiplied alpha, so that's them being
         // premultiplied by layerColor.a.
@@ -27,7 +28,7 @@ vec4 BlendLayer( uint layerIdx, vec4 outputValue, vec4 layerColor, float opacity
     }
     else if ( alphaMode == alpha_mode_coverage ) // coverage for accessibility looks
     {
-        outputValue = layerColor * layerAlpha + outputValue * (1.0f - layerAlpha);
+        outputValue = vec4(layerColor.rgb * layerAlpha, layerAlpha) + outputValue * (1.0f - layerAlpha);
     }
     else // none
     {

@@ -3779,6 +3779,16 @@ float g_flInternalDisplayBrightnessNits = 500.0f;
 float g_flHDRItmSdrNits = 100.f;
 float g_flHDRItmTargetNits = 1000.f;
 
+static uint32_t GetShaderAlphaMode( const FrameInfo_t::Layer_t *pLayer )
+{
+	// Keep the existing base/RGB-copy and additive PASSTHRU conventions.
+	if ( pLayer->eAlphaBlendingMode == ALPHA_BLENDING_MODE_PREMULTIPLIED &&
+		 pLayer->zpos != g_zposBase && pLayer->colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU )
+		return 3; // alpha_mode_premult_encoded
+
+	return uint32_t( pLayer->eAlphaBlendingMode );
+}
+
 #pragma pack(push, 1)
 struct BlitPushData_t
 {
@@ -3813,12 +3823,14 @@ struct BlitPushData_t
 			scale[i] = layer->scale;
 			offset[i] = layer->offsetPixelCenter();
 			opacity[i] = layer->opacity;
-            if (layer->isScreenSize() || (layer->filter == GamescopeUpscaleFilter::LINEAR && layer->viewConvertsToLinearAutomatically()))
+            if (layer->isScreenSize())
+                u_shaderFilter |= ((uint32_t)GamescopeUpscaleFilter::NEAREST) << (i * 4);
+            else if (layer->filter == GamescopeUpscaleFilter::LINEAR && layer->viewConvertsToLinearAutomatically())
                 u_shaderFilter |= ((uint32_t)GamescopeUpscaleFilter::FROM_VIEW) << (i * 4);
             else
                 u_shaderFilter |= ((uint32_t)layer->filter) << (i * 4);
 
-			u_alphaMode |= ((uint32_t)layer->eAlphaBlendingMode) << ( i * 4 );
+			u_alphaMode |= GetShaderAlphaMode( layer ) << ( i * 4 );
 
 			if (layer->ctm)
 			{
@@ -3960,12 +3972,14 @@ struct RcasPushData_t
 		{
 			const FrameInfo_t::Layer_t *layer = &frameInfo->layers.get( i );
 
-            if (i == 0 || layer->isScreenSize() || (layer->filter == GamescopeUpscaleFilter::LINEAR && layer->viewConvertsToLinearAutomatically()))
+            if (i != 0 && layer->isScreenSize())
+                u_shaderFilter |= ((uint32_t)GamescopeUpscaleFilter::NEAREST) << (i * 4);
+            else if (i == 0 || (layer->filter == GamescopeUpscaleFilter::LINEAR && layer->viewConvertsToLinearAutomatically()))
                 u_shaderFilter |= ((uint32_t)GamescopeUpscaleFilter::FROM_VIEW) << (i * 4);
             else
                 u_shaderFilter |= ((uint32_t)layer->filter) << (i * 4);
 
-			u_alphaMode |= ((uint32_t)layer->eAlphaBlendingMode) << ( i * 4 );
+			u_alphaMode |= GetShaderAlphaMode( layer ) << ( i * 4 );
 
 			if (layer->ctm)
 			{
