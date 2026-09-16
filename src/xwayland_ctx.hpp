@@ -35,6 +35,8 @@ struct focus_t
 	steamcompmgr_win_t				*overrideWindow = nullptr;
 	// Earlier overrides still mapped beneath the current one, oldest first. Global focus only.
 	std::vector<steamcompmgr_win_t*>	overrideUnderlayWindows;
+	// The focus window's transient parent, painted beneath it like a WM stacks a dialog.
+	steamcompmgr_win_t				*transientUnderlayWindow = nullptr;
 	steamcompmgr_win_t				*overrideWindowMouse = nullptr;
 	// Same-app helpers from other processes (eg. Xalia's highlight), painted above the override.
 	std::vector<steamcompmgr_win_t*>	decorationWindows;

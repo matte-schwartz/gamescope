@@ -2517,6 +2517,7 @@ paint_cached_base_layer(const gamescope::Rc<commit_t>& commit, const BaseLayerIn
 
 	layer->eAlphaBlendingMode = base.eAlphaBlendingMode;
 	layer->blackBorder = true;
+	layer->zpos = g_zposBase;
 }
 
 namespace PaintWindowFlag
@@ -2529,6 +2530,8 @@ namespace PaintWindowFlag
 	static const uint32_t NoFilter = 1u << 5;
 	static const uint32_t CoverageMode = 1u << 6;
 	static const uint32_t ClampToOutput = 1u << 7;
+	static const uint32_t Underlay = 1u << 8;
+	static const uint32_t OverUnderlay = 1u << 9;
 }
 using PaintWindowFlags = uint32_t;
 
@@ -2702,7 +2705,11 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
 	layer->applyColorMgmt = g_ColorMgmt.pending.enabled;
 	layer->zpos = g_zposBase;
 
-	if ( w != scaleW )
+	if ( flags & PaintWindowFlag::OverUnderlay )
+	{
+		layer->zpos = g_zposTransientFocus;
+	}
+	else if ( w != scaleW && !( flags & PaintWindowFlag::Underlay ) )
 	{
 		layer->zpos = g_zposOverride;
 	}
@@ -2792,6 +2799,38 @@ paint_window(global_focus_t *pFocus, steamcompmgr_win_t *w, steamcompmgr_win_t *
 		pFocus->uBasePlaneAppID = lastCommit->appID;
 		pFocus->bBasePlaneIsFifo = lastCommit->IsPerfOverlayFIFO();
 	}
+}
+
+// Skip the parent under a covering opaque focus rather than spend a plane on it every frame.
+static bool
+transient_underlay_visible( const focus_t *pFocus )
+{
+	steamcompmgr_win_t *w = pFocus->focusWindow;
+	steamcompmgr_win_t *parent = pFocus->transientUnderlayWindow;
+	if ( !w || !parent || w->isSteamStreamingClient )
+		return false;
+
+	// The held base commit that stands in for a missing one sits level with the parent.
+	commit_t *commit = get_window_last_done_commit_peek( w );
+	if ( !commit )
+		return false;
+
+	// An opaque swapchain's alpha is undefined, so never blend the parent through it.
+	if ( commit->feedback && commit->feedback->vk_composite_alpha == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR )
+		return false;
+
+	// The layer 0 colorspace decides the HDR composite paths.
+	if ( ColorspaceIsHDR( commit->colorspace() ) )
+		return false;
+
+	if ( DRMFormatHasAlpha( commit->vulkanTex->drmFormat() ) )
+		return true;
+
+	const Rect focusRect = w->GetGeometry();
+	const Rect parentRect = parent->GetGeometry();
+	return parentRect.nX < focusRect.nX || parentRect.nY < focusRect.nY ||
+		   parentRect.nX + parentRect.nWidth > focusRect.nX + focusRect.nWidth ||
+		   parentRect.nY + parentRect.nHeight > focusRect.nY + focusRect.nHeight;
 }
 
 bool g_bFirstFrame = true;
@@ -2928,10 +2967,13 @@ static void paint_pipewire()
 	static uint64_t s_ulLastFocusCommitId = 0;
 	static uint64_t s_ulLastOverrideCommitId = 0;
 	static uint64_t s_ulLastUnderlayCommitId = 0;
+	static uint64_t s_ulLastTransientUnderlayCommitId = 0;
 	static uint64_t s_ulLastDecorationCommitId = 0;
 
 	uint64_t ulFocusCommitId = window_last_done_commit_id( pFocus->focusWindow );
 	uint64_t ulOverrideCommitId = window_last_done_commit_id( pFocus->overrideWindow );
+	uint64_t ulTransientUnderlayCommitId = window_last_done_commit_id( pFocus->transientUnderlayWindow );
+
 	// Combine the underlay and decoration commits so damage to any of them, or a change
 	// in the set itself, pushes a new frame.
 	uint64_t ulUnderlayCommitId = 0;
@@ -2945,12 +2987,14 @@ static void paint_pipewire()
 	if ( ulFocusCommitId == s_ulLastFocusCommitId &&
 	     ulOverrideCommitId == s_ulLastOverrideCommitId &&
 	     ulUnderlayCommitId == s_ulLastUnderlayCommitId &&
+	     ulTransientUnderlayCommitId == s_ulLastTransientUnderlayCommitId &&
 	     ulDecorationCommitId == s_ulLastDecorationCommitId )
 		return;
 
 	s_ulLastFocusCommitId = ulFocusCommitId;
 	s_ulLastOverrideCommitId = ulOverrideCommitId;
 	s_ulLastUnderlayCommitId = ulUnderlayCommitId;
+	s_ulLastTransientUnderlayCommitId = ulTransientUnderlayCommitId;
 	s_ulLastDecorationCommitId = ulDecorationCommitId;
 
 	uint32_t uWidth = s_pPipewireBuffer->texture->width();
@@ -2966,7 +3010,9 @@ static void paint_pipewire()
 
 	// Paint the windows we have onto the Pipewire stream.
 	steamcompmgr_win_t *fit = pFocus->overrideWindow;
-	paint_window( pFocus, pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, fit );
+	if ( transient_underlay_visible( pFocus ) )
+		paint_window( pFocus, pFocus->transientUnderlayWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::Underlay, 1.0f, fit );
+	paint_window( pFocus, pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, frameInfo.layers.count() ? PaintWindowFlag::OverUnderlay : 0, 1.0f, fit );
 
 	// Leave room for the overlay painted below.
 	const int nReservedLayers = ( !ulFocusAppId && pFocus->overlayWindow && pFocus->overlayWindow->opacity ) ? 1 : 0;
@@ -3146,6 +3192,24 @@ paint_all( global_focus_t *pFocus, bool async )
 	frameInfo.eUpscaleScaler = pFocus->eUpscaleScaler;
 	frameInfo.nUpscaleSharpness = pFocus->nUpscaleSharpness;
 
+	// Leave room for the layers painted after these, so an underlay and a pile of helper windows
+	// cannot push out the Steam overlay or the cursor. The mura plane is not reserved and yields
+	// when the frame is full.
+	int nReservedLayers = 1; // cursor
+	if ( externalOverlay && externalOverlay->opacity && cv_paint_external_overlay_plane )
+		nReservedLayers++;
+	if ( cv_paint_steam_overlay_plane &&
+		 ( ( overlay && overlay->opacity ) ||
+		   ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() ) ) )
+		nReservedLayers++;
+	if ( notification && notification->opacity )
+		nReservedLayers++;
+
+	// The base, its fade layer and the override are unguarded, so the parent must fit beside them.
+	steamcompmgr_win_t *transientUnderlay = nullptr;
+	if ( transient_underlay_visible( pFocus ) && 2 + ( fadingOut ? 1 : 0 ) + ( override ? 1 : 0 ) + nReservedLayers <= k_nMaxLayers )
+		transientUnderlay = pFocus->transientUnderlayWindow;
+
 	// If the window we'd paint as the base layer is the streaming client,
 	// find the video underlay and put it up first in the scenegraph
 	if ( cv_paint_primary_plane )
@@ -3188,6 +3252,15 @@ paint_all( global_focus_t *pFocus, bool async )
 			}
 			else
 			{
+				// The parent keeps the black border, one on the layer above would paint over it.
+				PaintWindowFlags baseFlags = PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders;
+				if ( transientUnderlay )
+				{
+					paint_window(pFocus, transientUnderlay, w, &frameInfo, pFocus->cursor, PaintWindowFlag::DrawBorders | PaintWindowFlag::Underlay, 1.0f, fit);
+					if ( frameInfo.layers.count() )
+						baseFlags = PaintWindowFlag::BasePlane | PaintWindowFlag::OverUnderlay;
+				}
+
 				if ( fadingOut )
 				{
 					float opacityScale = pFocus->bPendingFade
@@ -3195,7 +3268,7 @@ paint_all( global_focus_t *pFocus, bool async )
 						: ((currentTime - pFocus->uFadeOutStartTime) / (float)g_FadeOutDuration);
 			
 					paint_cached_base_layer(pFocus->HeldCommits[HELD_COMMIT_FADE], pFocus->CachedPlanes[HELD_COMMIT_FADE], &frameInfo, 1.0f - opacityScale, false);
-					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::FadeTarget | PaintWindowFlag::DrawBorders, opacityScale, fit);
+					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, baseFlags | PaintWindowFlag::FadeTarget, opacityScale, fit);
 				}
 				else
 				{
@@ -3209,9 +3282,10 @@ paint_all( global_focus_t *pFocus, bool async )
 						}
 					}
 					// Just draw focused window as normal, be it Steam or the game
-					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, fit);
+					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, baseFlags, 1.0f, fit);
 
-					bool needsScaling = frameInfo.layers.get( 0 ).scale.x < 0.999f && frameInfo.layers.get( 0 ).scale.y < 0.999f;
+					// The layer 0 upscalers would run on the parent instead.
+					bool needsScaling = !transientUnderlay && frameInfo.layers.get( 0 ).scale.x < 0.999f && frameInfo.layers.get( 0 ).scale.y < 0.999f;
 					GamescopeUpscaleFilter eLayer0Filter = ResolveUpscaleFilter( frameInfo.eUpscaleFilter, frameInfo.layers.get( 0 ).colorspace, frameInfo.layers.get( 0 ).isYcbcr() );
 					frameInfo.useFSRLayer0 = eLayer0Filter == GamescopeUpscaleFilter::FSR && needsScaling;
 					frameInfo.useNISLayer0 = eLayer0Filter == GamescopeUpscaleFilter::NIS && needsScaling;
@@ -3242,19 +3316,6 @@ paint_all( global_focus_t *pFocus, bool async )
 	// with an offset.
 	// Josh: No override if we're streaming video
 	// as we will have too many layers. Better to be safe than sorry.
-	// Leave room for the layers painted after these, so an underlay and a pile of helper windows
-	// cannot push out the Steam overlay or the cursor. The mura plane is not reserved and yields
-	// when the frame is full.
-	int nReservedLayers = 1; // cursor
-	if ( externalOverlay && externalOverlay->opacity && cv_paint_external_overlay_plane )
-		nReservedLayers++;
-	if ( cv_paint_steam_overlay_plane &&
-		 ( ( overlay && overlay->opacity ) ||
-		   ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() ) ) )
-		nReservedLayers++;
-	if ( notification && notification->opacity )
-		nReservedLayers++;
-
 	if ( w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane )
 		paint_override_underlays( pFocus, w, &frameInfo, pFocus->cursor, nReservedLayers );
 
@@ -3610,7 +3671,9 @@ paint_all( global_focus_t *pFocus, bool async )
 				currentOutputWidth = uScreenshotWidth;
 				currentOutputHeight = uScreenshotHeight;
 
-				paint_window( pFocus, pFocus->focusWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
+				if ( transientUnderlay )
+					paint_window( pFocus, transientUnderlay, pFocus->focusWindow, &screenshotFrameInfo, nullptr, PaintWindowFlag::Underlay, 1.0f, pFocus->overrideWindow );
+				paint_window( pFocus, pFocus->focusWindow, pFocus->focusWindow, &screenshotFrameInfo, nullptr, screenshotFrameInfo.layers.count() ? PaintWindowFlag::OverUnderlay : 0, 1.0f, pFocus->overrideWindow );
 				if ( !pFocus->focusWindow->isSteamStreamingClient )
 					paint_override_underlays( pFocus, pFocus->focusWindow, &screenshotFrameInfo, nullptr, 0 );
 				if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
@@ -4259,6 +4322,7 @@ carry_override_underlay( focus_t *pFocus, steamcompmgr_win_t *pPreviousOverride,
 	auto isUnderlay = [&]( steamcompmgr_win_t *underlay )
 	{
 		return pFocus->overrideWindow && underlay != pFocus->overrideWindow &&
+			underlay != pFocus->transientUnderlayWindow &&
 			underlay->type == steamcompmgr_win_type_t::XWAYLAND &&
 			underlay->xwayland().a.map_state == IsViewable &&
 			is_good_override_candidate( underlay, pFocus->focusWindow );
@@ -4519,6 +4583,25 @@ found:;
 	}
 
 	out->overrideWindow = override_focus;
+
+	// Per-window mode gives the parent its own connector, so it would be painted twice.
+	steamcompmgr_win_t *painted = out->focusWindow;
+	out->transientUnderlayWindow = nullptr;
+	if ( painted && painted->type == steamcompmgr_win_type_t::XWAYLAND && painted->xwayland().transientFor &&
+		 !focusControlWindow && !win_treat_as_per_window( painted, eStrategy ) )
+	{
+		for ( steamcompmgr_win_t *parent : vecPossibleFocusWindows )
+		{
+			if ( parent != painted && parent != override_focus && !win_is_override_redirect( parent ) &&
+				 parent->type == steamcompmgr_win_type_t::XWAYLAND && parent->appID == painted->appID &&
+				 parent->xwayland().ctx == painted->xwayland().ctx &&
+				 parent->xwayland().id == painted->xwayland().transientFor )
+			{
+				out->transientUnderlayWindow = parent;
+				break;
+			}
+		}
+	}
 
 	return localGameFocused;
 }
@@ -5236,6 +5319,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 					pFocus->overrideWindow = nullptr;
 					pFocus->overrideUnderlayWindows.clear();
+					pFocus->transientUnderlayWindow = nullptr;
 					pFocus->decorationWindows.clear();
 				}
 			}
@@ -5244,7 +5328,8 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	// After the VR forwarder has had its say, since it clears both.
 	if ( pFocus->decorationWindows != previousLocalFocus.decorationWindows ||
-		 pFocus->overrideUnderlayWindows != previousLocalFocus.overrideUnderlayWindows )
+		 pFocus->overrideUnderlayWindows != previousLocalFocus.overrideUnderlayWindows ||
+		 pFocus->transientUnderlayWindow != previousLocalFocus.transientUnderlayWindow )
 		hasRepaintNonBasePlane = true;
 
 	// Pick cursor from our input focus window
@@ -6288,6 +6373,8 @@ destroy_win(xwayland_ctx_t *ctx, Window id, bool gone, bool fade)
 		ctx->focus.notificationWindow = nullptr;
 	if (x11_win(ctx->focus.overrideWindow) == id && gone)
 		ctx->focus.overrideWindow = nullptr;
+	if (x11_win(ctx->focus.transientUnderlayWindow) == id && gone)
+		ctx->focus.transientUnderlayWindow = nullptr;
 	if (x11_win(ctx->focus.overrideWindowMouse) == id && gone)
 		ctx->focus.overrideWindowMouse = nullptr;
 	if (ctx->currentKeyboardFocusWindow == id && gone)
@@ -6311,6 +6398,8 @@ destroy_win(xwayland_ctx_t *ctx, Window id, bool gone, bool fade)
 		// whether or not it is gone, so clear them either way.
 		if (x11_win(pFocus->overrideWindow) == id)
 			pFocus->overrideWindow = nullptr;
+		if (x11_win(pFocus->transientUnderlayWindow) == id)
+			pFocus->transientUnderlayWindow = nullptr;
 		if (x11_win(pFocus->fadeWindow) == id)
 			pFocus->fadeWindow = nullptr;
 		std::erase_if(pFocus->overrideUnderlayWindows, [id](steamcompmgr_win_t *w) { return x11_win(w) == id; });
@@ -6324,6 +6413,8 @@ destroy_win(xwayland_ctx_t *ctx, Window id, bool gone, bool fade)
 	if (x11_win(s_PipewireFocus.overrideWindow) == id)
 		s_PipewireFocus.overrideWindow = nullptr;
 	std::erase_if(s_PipewireFocus.overrideUnderlayWindows, [id](steamcompmgr_win_t *w) { return x11_win(w) == id; });
+	if (x11_win(s_PipewireFocus.transientUnderlayWindow) == id)
+		s_PipewireFocus.transientUnderlayWindow = nullptr;
 #endif
 
 	MakeFocusDirty();
@@ -7633,6 +7724,11 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 						pUnderlay->xwayland().ctx == server->ctx.get();
 				});
 
+				if (pFocus->transientUnderlayWindow &&
+					pFocus->transientUnderlayWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
+					pFocus->transientUnderlayWindow->xwayland().ctx == server->ctx.get())
+					pFocus->transientUnderlayWindow = nullptr;
+
 				std::erase_if(pFocus->decorationWindows, [&](steamcompmgr_win_t *pDecoration)
 				{
 					return pDecoration->type == steamcompmgr_win_type_t::XWAYLAND &&
@@ -7670,6 +7766,11 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 				return pUnderlay->type == steamcompmgr_win_type_t::XWAYLAND &&
 					pUnderlay->xwayland().ctx == server->ctx.get();
 			});
+
+			if (s_PipewireFocus.transientUnderlayWindow &&
+				s_PipewireFocus.transientUnderlayWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
+				s_PipewireFocus.transientUnderlayWindow->xwayland().ctx == server->ctx.get())
+				s_PipewireFocus.transientUnderlayWindow = nullptr;
 #endif
 
 			wlserver_lock();
@@ -7934,7 +8035,7 @@ bool handle_done_commit( steamcompmgr_win_t *w, xwayland_ctx_t *ctx, uint64_t co
 					pFocus->nFocusWindowPid = w->pid;
 				}
 
-				if ( w == pFocus->overrideWindow ||
+				if ( w == pFocus->overrideWindow || w == pFocus->transientUnderlayWindow ||
 					 gamescope::Algorithm::Contains( pFocus->overrideUnderlayWindows, w ) ||
 					 gamescope::Algorithm::Contains( pFocus->decorationWindows, w ) )
 				{
@@ -9257,6 +9358,8 @@ void steamcompmgr_check_xdg(bool vblank, uint64_t vblank_idx)
 			if (pFocus->overrideWindow && pFocus->overrideWindow->type == steamcompmgr_win_type_t::XDG)
 				pFocus->overrideWindow = nullptr;
 			std::erase_if(pFocus->overrideUnderlayWindows, [](steamcompmgr_win_t *w) { return w->type == steamcompmgr_win_type_t::XDG; });
+			if (pFocus->transientUnderlayWindow && pFocus->transientUnderlayWindow->type == steamcompmgr_win_type_t::XDG)
+				pFocus->transientUnderlayWindow = nullptr;
 			if (pFocus->fadeWindow && pFocus->fadeWindow->type == steamcompmgr_win_type_t::XDG)
 				pFocus->fadeWindow = nullptr;
 			if (pFocus->keyboardFocusWindow && pFocus->keyboardFocusWindow->type == steamcompmgr_win_type_t::XDG)
