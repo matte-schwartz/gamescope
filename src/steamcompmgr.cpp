@@ -6361,20 +6361,25 @@ static void configure_request(xwayland_ctx_t *ctx, XConfigureRequestEvent *confi
 	if ( w && ( configureRequest->value_mask & ( CWX | CWY ) ) && w->xwayland().a.map_state == IsViewable )
 	{
 		// Any window moved during a press may be the drag target, the anchor only applies under the pointer.
+		// A focus window glued to its parent repeats the parent's moves, so let those carry the drag.
+		bool bParentOfFocus = w == ctx->focus.transientUnderlayWindow;
 		wlserver_lock();
 		struct wlr_surface *pSurface = w->main_surface();
 		if ( pSurface && wlserver_input_held() )
 		{
-			// An axis the request leaves out falls back to where the anchor last saw it.
-			bool bTracked = wlserver.drag_anchor.surface == pSurface;
-			int nGrantX = ( configureRequest->value_mask & CWX ) ? changes.x : ( bTracked ? wlserver.drag_anchor.last_x : w->xwayland().a.x );
-			int nGrantY = ( configureRequest->value_mask & CWY ) ? changes.y : ( bTracked ? wlserver.drag_anchor.last_y : w->xwayland().a.y );
+			if ( !bParentOfFocus )
+			{
+				// An axis the request leaves out falls back to where the anchor last saw it.
+				bool bTracked = wlserver.drag_anchor.surface == pSurface;
+				int nGrantX = ( configureRequest->value_mask & CWX ) ? changes.x : ( bTracked ? wlserver.drag_anchor.last_x : w->xwayland().a.x );
+				int nGrantY = ( configureRequest->value_mask & CWY ) ? changes.y : ( bTracked ? wlserver.drag_anchor.last_y : w->xwayland().a.y );
 
-			xwm_log.debugf( "drag anchor: win 0x%x moved to %d,%d during a press", w->id(), nGrantX, nGrantY );
-			wlserver_drag_anchor_move( pSurface, nGrantX, nGrantY, w->xwayland().a.x, w->xwayland().a.y );
+				xwm_log.debugf( "drag anchor: win 0x%x moved to %d,%d during a press", w->id(), nGrantX, nGrantY );
+				wlserver_drag_anchor_move( pSurface, nGrantX, nGrantY, w->xwayland().a.x, w->xwayland().a.y );
+			}
 			w->placed = false;
 		}
-		else if ( pSurface && pSurface == wlserver.drag_settle_surface )
+		else if ( pSurface && !bParentOfFocus && pSurface == wlserver.drag_settle_surface )
 		{
 			// A client keeps moving until it sees the release, the budget bounds one that never stops.
 			if ( --wlserver.drag_settle_budget <= 0 )
