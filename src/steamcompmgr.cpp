@@ -4833,6 +4833,7 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 					// No support for overrides with this VR path!
 					ctx->focus.overrideWindow = nullptr;
 					ctx->focus.overrideWindowMouse = nullptr;
+					ctx->focus.transientUnderlayWindow = nullptr;
 				}
 
 				if ( queryWindow->oulTargetVROverlay && *queryWindow->oulTargetVROverlay == ulFocusedMouseOverlayVR )
@@ -4980,7 +4981,10 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 		inputFocus->Raise();
 
 	wlserver_lock();
-	bool bDragging = wlserver.drag_anchor.surface && wlserver.drag_anchor.surface == w->main_surface();
+	steamcompmgr_win_t *parent = ctx->focus.transientUnderlayWindow;
+	// The anchor follows whichever of the pair moved last, so either one under drag holds both.
+	bool bDragging = wlserver.drag_anchor.surface &&
+		( wlserver.drag_anchor.surface == w->main_surface() || ( parent && wlserver.drag_anchor.surface == parent->main_surface() ) );
 	wlserver_unlock();
 
 	// X confines the pointer to the screen, so clamp the focus window into it
@@ -4999,7 +5003,15 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
 				ctx->root_width, ctx->root_height, place.x, place.y );
 
 		if ( place.x != placeAttr.x || place.y != placeAttr.y )
+		{
 			XMoveWindow(ctx->dpy, w->xwayland().id, place.x, place.y);
+
+			// A client keeps a dialog glued to its parent, so the parent moves with it or the
+			// client puts the dialog straight back.
+			XWindowAttributes parentAttr;
+			if ( parent && XGetWindowAttributes( ctx->dpy, parent->xwayland().id, &parentAttr ) )
+				XMoveWindow(ctx->dpy, parent->xwayland().id, parentAttr.x + place.x - placeAttr.x, parentAttr.y + place.y - placeAttr.y);
+		}
 
 		w->placed = true;
 	}
