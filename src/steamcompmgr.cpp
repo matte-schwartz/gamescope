@@ -4160,6 +4160,38 @@ win_maybe_a_dropdown( steamcompmgr_win_t *w )
 	return ( valid_maybe_a_dropdown || win_is_override_redirect( w ) ) && !win_is_useless( w );
 }
 
+// Windows reported to Steam as switcher entries. Useless (1x1), skip taskbar + pager
+// and override redirect windows are left out.
+static bool
+win_is_reportable( steamcompmgr_win_t *w )
+{
+	return w->type == steamcompmgr_win_type_t::XWAYLAND &&
+		!win_is_useless( w ) && !win_skip_and_not_fullscreen( w ) && !w->xwayland().a.override_redirect;
+}
+
+// A parent's only reportable same-app transient shares the parent's switcher entry, as it is
+// painted with it.
+static steamcompmgr_win_t *
+win_folded_transient( steamcompmgr_win_t *parent, const std::vector<steamcompmgr_win_t*> &vecCandidates )
+{
+	if ( !win_is_reportable( parent ) )
+		return nullptr;
+
+	steamcompmgr_win_t *child = nullptr;
+	for ( steamcompmgr_win_t *candidate : vecCandidates )
+	{
+		if ( candidate == parent || !win_is_reportable( candidate ) || win_maybe_a_dropdown( candidate ) ||
+			 candidate->xwayland().ctx != parent->xwayland().ctx ||
+			 candidate->xwayland().transientFor != parent->xwayland().id ||
+			 candidate->appID != parent->appID )
+			continue;
+		if ( child )
+			return nullptr;
+		child = candidate;
+	}
+	return child;
+}
+
 static bool
 win_is_disabled( steamcompmgr_win_t *w )
 {
@@ -4477,16 +4509,21 @@ found:;
 	{
 		// Don't follow transient links for focus window when in per-window mode, or we end up duplicating
 		// windows in weird ways.
-		if ( !focusControlWindow && !win_treat_as_per_window( focus, eStrategy ) )
+		// A focus control pick names what the switcher lists, so only follow to a child folded into that entry.
+		if ( !win_treat_as_per_window( focus, eStrategy ) )
 		{
 			// Do some searches through game windows to follow transient links if needed
 			while ( true )
 			{
 				bool bFoundTransient = false;
+				steamcompmgr_win_t *folded = focusControlWindow ? win_folded_transient( focus, vecPossibleFocusWindows ) : nullptr;
 
 				for ( steamcompmgr_win_t *candidate : vecPossibleFocusWindows )
 				{
 					if ( candidate->type != steamcompmgr_win_type_t::XWAYLAND )
+						continue;
+
+					if ( focusControlWindow && candidate != folded )
 						continue;
 
 					if ( candidate != focus && candidate->xwayland().transientFor == focus->xwayland().id && !win_maybe_a_dropdown( candidate ) )
@@ -4588,7 +4625,7 @@ found:;
 	steamcompmgr_win_t *painted = out->focusWindow;
 	out->transientUnderlayWindow = nullptr;
 	if ( painted && painted->type == steamcompmgr_win_type_t::XWAYLAND && painted->xwayland().transientFor &&
-		 !focusControlWindow && !win_treat_as_per_window( painted, eStrategy ) )
+		 !win_treat_as_per_window( painted, eStrategy ) )
 	{
 		for ( steamcompmgr_win_t *parent : vecPossibleFocusWindows )
 		{
@@ -5137,7 +5174,7 @@ DumpFocusInfo()
 
 	xwayland_ctx_t *root_ctx = wlserver_get_xwayland_server( 0 )->ctx.get();
 	focus_log.infof( "Focused app property: %u", get_prop( root_ctx, root_ctx->root, root_ctx->atoms.gamescopeFocusedAppAtom, 0 ) );
-	focus_log.infof( "Focused window property: 0x%x", get_prop( root_ctx, root_ctx->root, root_ctx->atoms.gamescopeFocusedWindowAtom, 0 ) );
+	focus_log.infof( "Focused window property (switcher entry): 0x%x", get_prop( root_ctx, root_ctx->root, root_ctx->atoms.gamescopeFocusedWindowAtom, 0 ) );
 
 	gamescope_xwayland_server_t *server = NULL;
 	for ( size_t i = 0; ( server = wlserver_get_xwayland_server( i ) ); i++ )
@@ -5196,16 +5233,20 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	for ( steamcompmgr_win_t *focusable_window : vecPossibleFocusWindows )
 	{
-		if ( focusable_window->type != steamcompmgr_win_type_t::XWAYLAND )
+		if ( !win_is_reportable( focusable_window ) )
 			continue;
 
-		// Exclude windows that are useless (1x1), skip taskbar + pager or override redirect windows
-		// from the reported focusable windows to Steam.
-		if ( win_is_useless( focusable_window ) ||
-			win_skip_and_not_fullscreen( focusable_window ) ||
-			focusable_window->xwayland().a.override_redirect )
-			continue;
-
+		bool bFolded = false;
+		for ( steamcompmgr_win_t *parent : vecPossibleFocusWindows )
+		{
+			if ( parent != focusable_window && parent->type == steamcompmgr_win_type_t::XWAYLAND &&
+				 parent->xwayland().ctx == focusable_window->xwayland().ctx &&
+				 parent->xwayland().id == focusable_window->xwayland().transientFor )
+			{
+				bFolded = win_folded_transient( parent, vecPossibleFocusWindows ) == focusable_window;
+				break;
+			}
+		}
 		unsigned int unAppID = focusable_window->appID;
 		if ( unAppID != 0 )
 		{
@@ -5222,6 +5263,9 @@ determine_and_apply_focus( global_focus_t *pFocus )
 				focusable_appids.push_back( unAppID );
 			}
 		}
+
+		if ( bFolded )
+			continue;
 
 		// list of [window, appid, pid] triplets
 		focusable_windows.push_back( focusable_window->xwayland().id );
@@ -5506,7 +5550,27 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	if ( pFocus->focusWindow )
 	{
-		focusedWindow = (unsigned long)pFocus->focusWindow->id();
+		// A folded dialog is listed under its parent, so name that entry as the focus.
+		steamcompmgr_win_t *reported = pFocus->focusWindow;
+		for ( size_t remaining = vecPossibleFocusWindows.size(); remaining && reported->type == steamcompmgr_win_type_t::XWAYLAND && reported->xwayland().transientFor; --remaining )
+		{
+			steamcompmgr_win_t *parent = nullptr;
+			for ( steamcompmgr_win_t *candidate : vecPossibleFocusWindows )
+			{
+				if ( candidate->type == steamcompmgr_win_type_t::XWAYLAND &&
+					 candidate->xwayland().ctx == reported->xwayland().ctx &&
+					 candidate->xwayland().id == reported->xwayland().transientFor )
+				{
+					parent = candidate;
+					break;
+				}
+			}
+			if ( !parent || win_folded_transient( parent, vecPossibleFocusWindows ) != reported )
+				break;
+			reported = parent;
+		}
+
+		focusedWindow = (unsigned long)reported->id();
 		focusedBaseAppId = pFocus->focusWindow->appID;
 		// A focus window does not guarantee an input focus window.
 		if ( pFocus->inputFocusWindow )
