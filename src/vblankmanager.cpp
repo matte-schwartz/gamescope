@@ -294,6 +294,10 @@ namespace gamescope
 		{
 			std::unique_lock lock( m_ScheduleMutex );
 
+			// Feedback may have replaced the timer after epoll reported it ready.
+			if ( !ReadExpirations() )
+				return;
+
 			// Disarm the timer if it was armed.
 			if ( !m_bArmed.exchange( false ) )
 				return;
