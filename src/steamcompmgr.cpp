@@ -9322,6 +9322,14 @@ void update_edid_prop()
 	if (!filename)
 		return;
 
+	// Headless: present the virtual screen's identity, not the last display's.
+	if (GetBackend()->GetCurrentConnector() && GetBackend()->GetCurrentConnector()->IsHeadless())
+	{
+		const char *pszVirtualEdid = gamescope::EnsureVirtualEdid();
+		if (pszVirtualEdid)
+			filename = pszVirtualEdid;
+	}
+
 	gamescope_xwayland_server_t *server = NULL;
 	for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)
 	{
@@ -10207,6 +10215,7 @@ steamcompmgr_main(int argc, char **argv)
 			hasRepaint = true;
 
 			update_mode_atoms(root_ctx, &flush_root);
+			update_edid_prop();
 		}
 
 		g_uCompositeDebug = cv_composite_debug;
