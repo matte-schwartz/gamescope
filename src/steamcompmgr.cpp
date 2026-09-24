@@ -299,6 +299,7 @@ gamescope::ConVar<bool> cv_adaptive_sync_ignore_overlay( "adaptive_sync_ignore_o
 gamescope::ConVar<int> cv_adaptive_sync_overlay_cycles( "adaptive_sync_overlay_cycles", 1, "Number of vblank cycles to ignore overlay repaints before forcing a commit with adaptive sync." );
 gamescope::ConVar<bool> cv_adaptive_sync_uncapped( "adaptive_sync_uncapped", true, "Whether or not to allow mailbox/immediate clients to run uncapped with adaptive sync by deferring paints until the display can take a new flip." );
 gamescope::ConVar<int> cv_adaptive_sync_cursor_min_fps( "adaptive_sync_cursor_min_fps", 30, "Content frame rate at or above which cursor repaints coalesce with content frames when adaptive sync is on. 0 = repaint the cursor immediately." );
+gamescope::ConVar<bool> cv_adaptive_sync_idle_hold( "adaptive_sync_idle_hold", true, "Hold the display at its refresh rate while the Steam UI is focused with adaptive sync." );
 
 gamescope::ConVar<bool> cv_upscale_preemptive( "upscale_preemptive", true, "Allow pre-emptive upscaling" );
 gamescope::ConVar<bool> cv_upscale_preemptive_debug_force_sync( "upscale_preemptive_debug_force_sync", false, "Force synchronize pre-emptive upscaling" );
@@ -3103,7 +3104,7 @@ gamescope::ConVar<bool> cv_paint_cursor_plane{ "paint_cursor_plane", true };
 gamescope::ConVar<bool> cv_paint_mura_plane{ "paint_mura_plane", true };
 
 static void
-paint_all( global_focus_t *pFocus, bool async )
+paint_all( global_focus_t *pFocus, bool async, bool bRepeatFrame )
 {
 	if ( !pFocus )
 		return;
@@ -3163,6 +3164,7 @@ paint_all( global_focus_t *pFocus, bool async )
 	frameInfo.applyOutputColorMgmt = g_ColorMgmt.pending.enabled;
 	frameInfo.outputEncodingEOTF = g_ColorMgmt.pending.outputEncodingEOTF;
 	frameInfo.allowVRR = cv_adaptive_sync;
+	frameInfo.bRepeatFrame = bRepeatFrame;
 	frameInfo.bFadingOut = fadingOut;
 	frameInfo.eUpscaleFilter = pFocus->eUpscaleFilter;
 	frameInfo.eUpscaleScaler = pFocus->eUpscaleScaler;
@@ -10317,6 +10319,9 @@ steamcompmgr_main(int argc, char **argv)
 			currentHDRCapable = bOutputHDRCapable;
 			currentHDRForce = g_bForceHDRSupportDebug;
 
+			// The remade output images hold nothing on screen yet, so the next frame must draw.
+			hasRepaint = true;
+
 #if HAVE_PIPEWIRE
 			nudge_pipewire();
 #endif
@@ -10525,6 +10530,7 @@ steamcompmgr_main(int argc, char **argv)
 		for ( auto &iter : g_VirtualConnectorFocuses )
 		{
 			global_focus_t *pPaintFocus = &iter.second;
+			bool bRepeatFrame = false;
 
 			const UpscaleSettings_t upscaleSettings = GetUpscaleSettings(
 				window_is_steam( pPaintFocus->focusWindow ),
@@ -10644,6 +10650,14 @@ steamcompmgr_main(int argc, char **argv)
 							}
 						}
 
+						// Hold the Steam UI at the refresh rate so an idle panel can't stretch toward its minimum and flicker.
+						if ( !bShouldPaint && bIsVBlankFromTimer && g_bSteamIsActiveWindow &&
+						     cv_adaptive_sync_idle_hold )
+						{
+							bShouldPaint = true;
+							bRepeatFrame = !hasRepaint && !hasCursorRepaint && !hasRepaintNonBasePlane;
+						}
+
 						if ( bIsVBlankFromTimer )
 						{
 							if ( hasRepaintNonBasePlane )
@@ -10681,7 +10695,7 @@ steamcompmgr_main(int argc, char **argv)
 
 			if ( bShouldPaint )
 			{
-				paint_all( pPaintFocus, eFlipType == FlipType::Async );
+				paint_all( pPaintFocus, eFlipType == FlipType::Async, bRepeatFrame );
 
 				bPainted = true;
 			}
