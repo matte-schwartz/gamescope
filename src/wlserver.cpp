@@ -3185,7 +3185,8 @@ bool wlserver_surface_is_fifo( struct wlr_surface *surf )
 
 	if ( wl_surf->oCurrentPresentMode )
 	{
-		return wl_surf->oCurrentPresentMode == VK_PRESENT_MODE_FIFO_KHR;
+		return wl_surf->oCurrentPresentMode == VK_PRESENT_MODE_FIFO_KHR ||
+			   wl_surf->oCurrentPresentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
 	}
 
 	return false;

@@ -445,6 +445,21 @@ namespace GamescopeWSILayer {
     },
   };
 
+  static VkResult getEmulatedPresentModes(const vkroots::VkInstanceDispatch* pDispatch, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, std::vector<VkPresentModeKHR> &modes) {
+    uint32_t count = 0;
+    VkResult res = pDispatch->GetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, nullptr);
+    if (res != VK_SUCCESS)
+      return res;
+    modes.resize(count);
+    res = pDispatch->GetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, modes.data());
+    if (res < VK_SUCCESS)
+      return res;
+    modes.resize(count);
+    if (std::ranges::find(modes, VK_PRESENT_MODE_FIFO_RELAXED_KHR) == modes.end())
+      modes.push_back(VK_PRESENT_MODE_FIFO_RELAXED_KHR);
+    return VK_SUCCESS;
+  }
+
   static bool gamescopeIsForcingFifo(const GamescopeWaylandObjects& waylandObjects) {
     if (waylandObjects.limiterState)
       return waylandObjects.limiterState->state == 1;
@@ -968,27 +983,45 @@ namespace GamescopeWSILayer {
       if (!gamescopeSurface)
         return pDispatch->GetPhysicalDeviceSurfaceCapabilities2KHR(physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
 
-      // Incomplete writes here, do not return VK_INCOMPLETE.
-      if (gamescopeIsForcingFifo(gamescopeSurface->waylandObjects) && gamescopeSurface->frameLimiterAware()) {
-        const auto *pPresentMode = vkroots::FindInChain<VkSurfacePresentModeEXT>(pSurfaceInfo);
-        const std::array<VkPresentModeKHR, 1> s_SingleMode = {{
-          pPresentMode ? pPresentMode->presentMode : VK_PRESENT_MODE_FIFO_KHR,
-        }};
-        auto [pPresentModeCompat, pPresentModeCompatParent] = vkroots::RemoveFromChain<VkSurfacePresentModeCompatibilityEXT>(pSurfaceCapabilities);
-        if (pPresentModeCompat)
-          vkroots::helpers::array(s_SingleMode, &pPresentModeCompat->presentModeCount, pPresentModeCompat->pPresentModes);
-
-        VkResult res = VK_SUCCESS;
-        if ((res = pDispatch->GetPhysicalDeviceSurfaceCapabilities2KHR(physicalDevice, pSurfaceInfo, pSurfaceCapabilities)) != VK_SUCCESS)
-          return res;
-
-        if (pPresentModeCompat)
-          vkroots::AddToChain(pPresentModeCompatParent, pPresentModeCompat);
-      } else {
-        VkResult res = VK_SUCCESS;
-        if ((res = pDispatch->GetPhysicalDeviceSurfaceCapabilities2KHR(physicalDevice, pSurfaceInfo, pSurfaceCapabilities)) != VK_SUCCESS)
-          return res;
+      const auto *pPresentMode = vkroots::FindInChain<VkSurfacePresentModeEXT>(pSurfaceInfo);
+      std::vector<VkPresentModeKHR> compatModes;
+      if (vkroots::FindInChain<VkSurfacePresentModeCompatibilityEXT>(pSurfaceCapabilities)) {
+        if (gamescopeIsForcingFifo(gamescopeSurface->waylandObjects) && gamescopeSurface->frameLimiterAware())
+          compatModes = { pPresentMode ? pPresentMode->presentMode : VK_PRESENT_MODE_FIFO_KHR };
+        else if (!gamescopeSurface->isWayland()) {
+          if (VkResult res = getEmulatedPresentModes(pDispatch, physicalDevice, pSurfaceInfo->surface, compatModes); res != VK_SUCCESS)
+            return res;
+        }
       }
+
+      const VkPhysicalDeviceSurfaceInfo2KHR *pDriverSurfaceInfo = pSurfaceInfo;
+      VkPhysicalDeviceSurfaceInfo2KHR fifoSurfaceInfo;
+      VkSurfacePresentModeEXT fifoMode;
+      if (pPresentMode && pPresentMode->presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR && !gamescopeSurface->isWayland()) {
+        fifoMode = {
+          .sType       = VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_EXT,
+          .pNext       = pPresentMode->pNext,
+          .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+        };
+        fifoSurfaceInfo = *pSurfaceInfo;
+        fifoSurfaceInfo.pNext = &fifoMode;
+        pDriverSurfaceInfo = &fifoSurfaceInfo;
+      }
+
+      // Incomplete writes here, do not return VK_INCOMPLETE.
+      VkSurfacePresentModeCompatibilityEXT *pPresentModeCompat = nullptr;
+      VkBaseOutStructure *pPresentModeCompatParent = nullptr;
+      if (!compatModes.empty()) {
+        std::tie(pPresentModeCompat, pPresentModeCompatParent) = vkroots::RemoveFromChain<VkSurfacePresentModeCompatibilityEXT>(pSurfaceCapabilities);
+        if (pPresentModeCompat)
+          vkroots::helpers::array(compatModes, &pPresentModeCompat->presentModeCount, pPresentModeCompat->pPresentModes);
+      }
+
+      VkResult res = pDispatch->GetPhysicalDeviceSurfaceCapabilities2KHR(physicalDevice, pDriverSurfaceInfo, pSurfaceCapabilities);
+      if (pPresentModeCompat)
+        vkroots::AddToChain(pPresentModeCompatParent, pPresentModeCompat);
+      if (res != VK_SUCCESS)
+        return res;
 
       if (!gamescopeSurface->isWayland()) {
         auto rect = xcb::getWindowRect(gamescopeSurface->connection, gamescopeSurface->window);
@@ -1029,6 +1062,13 @@ namespace GamescopeWSILayer {
       if (auto state = GamescopeSurface::get(surface)) {
         if (gamescopeIsForcingFifo(state->waylandObjects) && state->frameLimiterAware())
           return vkroots::helpers::array(s_FifoPresentModes, pPresentModeCount, pPresentModes);
+
+        if (!state->isWayland()) {
+          std::vector<VkPresentModeKHR> modes;
+          if (VkResult res = getEmulatedPresentModes(pDispatch, physicalDevice, surface, modes); res != VK_SUCCESS)
+            return res;
+          return vkroots::helpers::array(modes, pPresentModeCount, pPresentModes);
+        }
       }
 
       return pDispatch->GetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, pPresentModeCount, pPresentModes);
@@ -1561,7 +1601,7 @@ namespace GamescopeWSILayer {
               gamescope_swapchain_override_window_content(gamescopeSwapchain->object, gamescopeSwapchain->serverId, gamescopeSurface->window);
             }
             VkPresentModeKHR presentMode = oOriginalPresentModeInfo ? oOriginalPresentModeInfo->pPresentModes[i] : gamescopeSwapchain->presentMode;
-            if (forceFifo && !frameLimiterAware)
+            if ((forceFifo && !frameLimiterAware) || presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR)
               presentMode = VK_PRESENT_MODE_FIFO_KHR;
             gamescope_swapchain_set_present_mode(gamescopeSwapchain->object, uint32_t(presentMode));
           }
