@@ -321,6 +321,7 @@ bool CVulkanDevice::BInit(VkInstance instance, VkSurfaceKHR surface)
 
 	m_bInitialized = true;
 
+	atexit([]{ g_device.stopPipelineCompilation(); });
 	m_pipelineThread = std::jthread([this](std::stop_token st){compileAllPipelines(st);});
 
 	g_reshadeManager.init(this);
@@ -1226,6 +1227,8 @@ void CVulkanDevice::compileAllPipelines(std::stop_token st)
 						continue;
 					if (blur_layers > layerCount)
 						continue;
+					if (st.stop_requested())
+						return;
 
 					VkPipeline newPipeline = compilePipeline(layerCount, ycbcrMask, info.shaderType, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.itmEnable);
 					{
@@ -1240,6 +1243,14 @@ void CVulkanDevice::compileAllPipelines(std::stop_token st)
 			}
 		}
 	}
+}
+
+void CVulkanDevice::stopPipelineCompilation()
+{
+	if (!m_pipelineThread.joinable())
+		return;
+	m_pipelineThread.request_stop();
+	m_pipelineThread.join();
 }
 
 extern bool g_bSteamIsActiveWindow;
@@ -2998,6 +3009,11 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
 		wlr_drm_format_set_add( &sampledDRMFormats, drmFormat, DRM_FORMAT_MOD_INVALID );
 		return false;
 	}
+}
+
+void vulkan_shutdown_pipelines()
+{
+	g_device.stopPipelineCompilation();
 }
 
 bool vulkan_init_formats()

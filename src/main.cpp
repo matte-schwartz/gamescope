@@ -1113,6 +1113,8 @@ int main(int argc, char **argv)
 
 	steamCompMgrThread.join();
 
+	vulkan_shutdown_pipelines();
+
 	gamescope::Process::KillAllChildren( getpid(), SIGTERM );
 	gamescope::Process::WaitForAllChildren();
 }

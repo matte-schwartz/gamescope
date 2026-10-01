@@ -460,6 +460,7 @@ namespace CompositeDebugFlag
 VkInstance vulkan_get_instance(void);
 bool vulkan_init(VkInstance instance, VkSurfaceKHR surface);
 bool vulkan_init_formats(void);
+void vulkan_shutdown_pipelines(void);
 bool vulkan_make_output();
 
 gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_dmabuf( struct wlr_dmabuf_attributes *pDMA, gamescope::OwningRc<gamescope::IBackendFb> pBackendFb );
@@ -834,6 +835,7 @@ class CVulkanDevice
 {
 public:
 	bool BInit(VkInstance instance, VkSurfaceKHR surface);
+	void stopPipelineCompilation();
 
 	VkSampler sampler(SamplerState key);
 	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, bool itm_enable = false);
