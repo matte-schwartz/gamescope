@@ -327,17 +327,18 @@ static const gamescope_color_mgmt_t k_ScreenshotColorMgmtHDR =
 // sudo cpupower frequency-set --governor performance
 
 static void
-create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_color_mgmt_luts outColorMgmtLuts[ EOTF_Count ])
+create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_color_mgmt_luts outColorMgmtLuts[ EOTF_Count ],
+	bool bUpload = true, const std::shared_ptr<lut3d_t> *pLooks = nullptr)
 {
 	const displaycolorimetry_t& displayColorimetry = newColorMgmt.displayColorimetry;
 	const displaycolorimetry_t& outputEncodingColorimetry = newColorMgmt.outputEncodingColorimetry;
 
 	for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
 	{
-		if (!outColorMgmtLuts[nInputEOTF].vk_lut1d)
+		if (bUpload && !outColorMgmtLuts[nInputEOTF].vk_lut1d)
 			outColorMgmtLuts[nInputEOTF].vk_lut1d = vulkan_create_1d_lut(s_nLutSize1d);
 
-		if (!outColorMgmtLuts[nInputEOTF].vk_lut3d)
+		if (bUpload && !outColorMgmtLuts[nInputEOTF].vk_lut3d)
 			outColorMgmtLuts[nInputEOTF].vk_lut3d = vulkan_create_3d_lut(s_nLutEdgeSize3d, s_nLutEdgeSize3d, s_nLutEdgeSize3d);
 
 		// FIXME: an override bypasses the backlight gain below, like night mode and looks.
@@ -356,7 +357,7 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
 
 			EOTF inputEOTF = static_cast<EOTF>( nInputEOTF );
 			float flGain = 1.f;
-			std::shared_ptr<lut3d_t> pSharedLook = g_ColorMgmtLooks[ nInputEOTF ];
+			std::shared_ptr<lut3d_t> pSharedLook = pLooks ? pLooks[ nInputEOTF ] : g_ColorMgmtLooks[ nInputEOTF ].load();
 			lut3d_t * pLook = pSharedLook && pSharedLook->lutEdgeSize > 0 ? pSharedLook.get() : nullptr;
 
 			if ( inputEOTF == EOTF_Gamma22 )
@@ -455,8 +456,51 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
 		outColorMgmtLuts[nInputEOTF].bHasLut1D = true;
 		outColorMgmtLuts[nInputEOTF].bHasLut3D = true;
 
-		vulkan_update_luts(outColorMgmtLuts[nInputEOTF].vk_lut1d, outColorMgmtLuts[nInputEOTF].vk_lut3d, outColorMgmtLuts[nInputEOTF].lut1d, outColorMgmtLuts[nInputEOTF].lut3d);
+		if ( bUpload )
+			vulkan_update_luts(outColorMgmtLuts[nInputEOTF].vk_lut1d, outColorMgmtLuts[nInputEOTF].vk_lut3d, outColorMgmtLuts[nInputEOTF].lut1d, outColorMgmtLuts[nInputEOTF].lut3d);
 	}
+}
+
+gamescope_color_mgmt_luts g_ColorMgmtLutsScanout[ EOTF_Count ];
+float g_flColorMgmtScanoutHDRMult[ EOTF_Count ];
+uint32_t g_ColorMgmtScanoutSerial = 0;
+
+// Plane scanout applies the input gains with AMD_PLANE_HDR_MULT, so its LUTs only change when something else does.
+void ensure_scanout_color_mgmt_luts()
+{
+	static std::optional<gamescope_color_mgmt_t> s_ScanoutColorMgmt;
+
+	const gamescope_color_mgmt_t &colorMgmt = g_ColorMgmt.current;
+	gamescope_color_mgmt_t scanoutColorMgmt = colorMgmt;
+	scanoutColorMgmt.flBacklightLutGain = 1.f;
+
+	std::shared_ptr<lut3d_t> looks[ EOTF_Count ];
+	for ( uint32_t i = 0; i < EOTF_Count; i++ )
+	{
+		looks[ i ] = g_ColorMgmtLooks[ i ].load();
+		float flGain = ( i == EOTF_PQ ? colorMgmt.flHDRInputGain : colorMgmt.flSDRInputGain ) * colorMgmt.flBacklightLutGain;
+
+		// Overrides and looks act on the encoded signal ahead of the gain, and a zero multiplier programs as 1.0.
+		bool bBakeGain = g_ColorMgmtLutsOverride[ i ].HasLuts() || ( looks[ i ] && looks[ i ]->lutEdgeSize > 0 ) || flGain < 1.f / 1024.f;
+
+		// The SDR shaper TF stops at 1.0, so SDR gain above that stays in the LUTs.
+		g_flColorMgmtScanoutHDRMult[ i ] = bBakeGain ? 1.f : ( i == EOTF_PQ ? flGain : std::min( flGain, 1.f ) );
+
+		float &flLutGain = i == EOTF_PQ ? scanoutColorMgmt.flHDRInputGain : scanoutColorMgmt.flSDRInputGain;
+		flLutGain = flGain / g_flColorMgmtScanoutHDRMult[ i ];
+	}
+
+	if ( s_ScanoutColorMgmt && *s_ScanoutColorMgmt == scanoutColorMgmt )
+		return;
+
+	if ( scanoutColorMgmt.enabled )
+		create_color_mgmt_luts( scanoutColorMgmt, g_ColorMgmtLutsScanout, false, looks );
+	else
+		for ( auto &luts : g_ColorMgmtLutsScanout )
+			luts.reset();
+
+	s_ScanoutColorMgmt = scanoutColorMgmt;
+	g_ColorMgmtScanoutSerial++;
 }
 
 gamescope::ConVar<bool> cv_tearing_enabled{ "tearing_enabled", false, "Whether or not tearing is enabled." };

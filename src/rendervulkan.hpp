@@ -578,6 +578,12 @@ struct gamescope_color_mgmt_tracker_t
 
 extern gamescope_color_mgmt_tracker_t g_ColorMgmt;
 extern gamescope_color_mgmt_luts g_ColorMgmtLuts[ EOTF_Count ];
+// Plane scanout LUTs without the gains in g_flColorMgmtScanoutHDRMult, which go to AMD_PLANE_HDR_MULT.
+extern gamescope_color_mgmt_luts g_ColorMgmtLutsScanout[ EOTF_Count ];
+extern float g_flColorMgmtScanoutHDRMult[ EOTF_Count ];
+extern uint32_t g_ColorMgmtScanoutSerial;
+// Brings the scanout LUTs and multipliers up to date with g_ColorMgmt.current.
+void ensure_scanout_color_mgmt_luts();
 
 struct VulkanOutput_t
 {

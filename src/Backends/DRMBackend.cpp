@@ -65,6 +65,7 @@ gamescope::ConVar<bool> cv_drm_single_plane_optimizations( "drm_single_plane_opt
 gamescope::ConVar<bool> cv_drm_cursor_plane( "drm_cursor_plane", false, "Scan out the cursor with the DRM cursor plane instead of forcing composition while a cursor is visible. Known driver issues on AMDGPU." );
 
 gamescope::ConVar<bool> cv_drm_debug_disable_shaper_and_3dlut( "drm_debug_disable_shaper_and_3dlut", false, "Shaper + 3DLUT chicken bit. (Force disable/DEFAULT, no logic change)" );
+gamescope::ConVar<bool> cv_drm_debug_disable_hdr_mult_gain( "drm_debug_disable_hdr_mult_gain", false, "Bake the input and backlight gains into the plane LUTs instead of applying them with AMD_PLANE_HDR_MULT." );
 gamescope::ConVar<bool> cv_drm_debug_disable_degamma_tf( "drm_debug_disable_degamma_tf", false, "Degamma chicken bit. (Forces DEGAMMA_TF to DEFAULT, does not affect other logic)" );
 gamescope::ConVar<bool> cv_drm_debug_disable_regamma_tf( "drm_debug_disable_regamma_tf", false, "Regamma chicken bit. (Forces REGAMMA_TF to DEFAULT, does not affect other logic)" );
 gamescope::ConVar<bool> cv_drm_debug_disable_output_tf( "drm_debug_disable_output_tf", false, "Force default (identity) output TF, affects other logic. Not a property directly." );
@@ -74,6 +75,8 @@ gamescope::ConVar<bool> cv_drm_debug_disable_color_encoding( "drm_debug_disable_
 gamescope::ConVar<bool> cv_drm_debug_disable_color_range( "drm_debug_disable_color_range", false, "YUV Color Range chicken bit. (Forces COLOR_RANGE to DEFAULT, does not affect other logic)" );
 gamescope::ConVar<bool> cv_drm_debug_disable_explicit_sync( "drm_debug_disable_explicit_sync", false, "Force disable explicit sync on the DRM backend." );
 gamescope::ConVar<bool> cv_drm_debug_disable_in_fence_fd( "drm_debug_disable_in_fence_fd", false, "Force disable IN_FENCE_FD being set to avoid over-synchronization on the DRM backend." );
+
+static constexpr uint64_t k_ulDrmHdrMultUnity = 0x100000000ULL;
 
 gamescope::ConVar<bool> cv_drm_allow_dynamic_modes_for_external_display( "drm_allow_dynamic_modes_for_external_display", false, "Allow dynamic mode/refresh rate switching for external displays." );
 
@@ -135,6 +138,8 @@ struct drm_t {
 	struct drm_state_t {
 		std::shared_ptr<gamescope::BackendBlob> mode_id;
 		uint32_t color_mgmt_serial;
+		// The LUT blobs come from g_ColorMgmtLutsScanout and the gains from AMD_PLANE_HDR_MULT.
+		bool scanout_luts = false;
 		std::shared_ptr<gamescope::BackendBlob> lut3d_id[ EOTF_Count ];
 		std::shared_ptr<gamescope::BackendBlob> shaperlut_id[ EOTF_Count ];
 		amdgpu_transfer_function output_tf = AMDGPU_TRANSFER_FUNCTION_DEFAULT;
@@ -572,8 +577,9 @@ extern std::string g_reshade_effect;
 #define DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP 0x15
 #endif
 
-bool drm_update_color_mgmt(struct drm_t *drm);
+bool drm_update_color_mgmt(struct drm_t *drm, const FrameInfo_t *frameInfo);
 bool drm_supports_color_mgmt(struct drm_t *drm);
+static bool drm_supports_hdr_mult(struct drm_t *drm);
 bool drm_set_connector( struct drm_t *drm, gamescope::CDRMConnector *conn );
 
 struct drm_color_ctm2 {
@@ -1795,7 +1801,7 @@ void finish_drm(struct drm_t *drm)
 			pPlane->GetProperties().AMD_PLANE_CTM->SetPendingValue( req, 0, true );
 
 		if ( pPlane->GetProperties().AMD_PLANE_HDR_MULT )
-			pPlane->GetProperties().AMD_PLANE_HDR_MULT->SetPendingValue( req, 0x100000000ULL, true );
+			pPlane->GetProperties().AMD_PLANE_HDR_MULT->SetPendingValue( req, k_ulDrmHdrMultUnity, true );
 
 		if ( pPlane->GetProperties().AMD_PLANE_SHAPER_TF )
 			pPlane->GetProperties().AMD_PLANE_SHAPER_TF->SetPendingValue( req, AMDGPU_TRANSFER_FUNCTION_DEFAULT, true );
@@ -2156,6 +2162,12 @@ static inline uint32_t ColorSpaceToEOTFIndex( GamescopeAppTextureColorspace colo
 		case GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ:
 			return EOTF_PQ;
 	}
+}
+
+// AMD_PLANE_HDR_MULT is S31.32 sign-magnitude, the gains are never negative.
+static inline uint64_t drm_hdr_mult_from_float( float flValue )
+{
+	return (uint64_t)( (double)flValue * (double)k_ulDrmHdrMultUnity + 0.5 );
 }
 
 
@@ -2988,6 +3000,24 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 						shaper_tf = AMDGPU_TRANSFER_FUNCTION_BT709_OETF;
 					}
 
+					uint64_t ulHDRMult = k_ulDrmHdrMultUnity;
+					if ( drm->pending.scanout_luts && !cv_drm_debug_disable_shaper_and_3dlut )
+					{
+						float flHDRMult = g_flColorMgmtScanoutHDRMult[ ColorSpaceToEOTFIndex( entry.layerState[i].colorspace ) ];
+						ulHDRMult = drm_hdr_mult_from_float( flHDRMult );
+
+						// The LUTs treat SDR as gamma 2.2, so the multiplier has to apply in that space.
+						if ( degamma_tf == AMDGPU_TRANSFER_FUNCTION_SRGB_EOTF &&
+						     ( flHDRMult != 1.f || frameInfo->outputEncodingEOTF == EOTF_PQ ) )
+						{
+							degamma_tf = AMDGPU_TRANSFER_FUNCTION_GAMMA22_EOTF;
+							shaper_tf = AMDGPU_TRANSFER_FUNCTION_GAMMA22_INV_EOTF;
+						}
+					}
+
+					if ( drm_supports_hdr_mult( drm ) )
+						liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_HDR_MULT", ulHDRMult );
+
 					bool bUseDegamma = !cv_drm_debug_disable_degamma_tf;
 					if ( bUseDegamma )
 						liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_DEGAMMA_TF", degamma_tf );
@@ -3019,6 +3049,8 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_SHAPER_TF", 0 );
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_LUT3D", 0 );
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_CTM", 0 );
+					if ( drm_supports_hdr_mult( drm ) )
+						liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_HDR_MULT", k_ulDrmHdrMultUnity );
 				}
 			}
 
@@ -3052,6 +3084,8 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_LUT3D", 0 );
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_BLEND_TF", AMDGPU_TRANSFER_FUNCTION_DEFAULT );
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_CTM", 0 );
+				if ( drm_supports_hdr_mult( drm ) )
+					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_HDR_MULT", k_ulDrmHdrMultUnity );
 			}
 		}
 	}
@@ -3202,7 +3236,7 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 	if ( !drm->pConnector )
 		return -EACCES;
 
-	drm_update_color_mgmt(drm);
+	drm_update_color_mgmt(drm, frameInfo);
 
 	const bool bIsVRRCapable = drm->pConnector && drm->pConnector->GetProperties().vrr_capable && !!drm->pConnector->GetProperties().vrr_capable->GetCurrentValue();
 	const bool bHasVRREnable = drm->pCRTC && drm->pCRTC->GetProperties().VRR_ENABLED;
@@ -3536,15 +3570,32 @@ gamescope::GamescopeScreenType drm_get_screen_type(struct drm_t *drm)
 	return drm->pConnector->GetScreenType();
 }
 
-bool drm_update_color_mgmt(struct drm_t *drm)
+bool drm_update_color_mgmt(struct drm_t *drm, const FrameInfo_t *frameInfo)
 {
 	if ( !drm_supports_color_mgmt( drm ) )
 		return true;
 
-	if ( g_ColorMgmt.serial == drm->current.color_mgmt_serial )
+	bool bScanoutLuts = drm_supports_hdr_mult( drm ) && !cv_drm_debug_disable_hdr_mult_gain;
+	for ( int i = 0; bScanoutLuts && i < frameInfo->layers.count(); i++ )
+	{
+		// The BT.709 curves YCbCr planes need would put the SDR multiplier in the wrong space.
+		const FrameInfo_t::Layer_t &layer = frameInfo->layers.get( i );
+		if ( layer.applyColorMgmt && layer.isYcbcr() && ColorSpaceToEOTFIndex( layer.colorspace ) == EOTF_Gamma22 )
+			bScanoutLuts = false;
+	}
+
+	if ( bScanoutLuts )
+		ensure_scanout_color_mgmt_luts();
+
+	const uint32_t uSerial = bScanoutLuts ? g_ColorMgmtScanoutSerial : g_ColorMgmt.serial;
+	const gamescope_color_mgmt_luts *pLuts = bScanoutLuts ? g_ColorMgmtLutsScanout : g_ColorMgmtLuts;
+
+	drm->pending.scanout_luts = bScanoutLuts;
+
+	if ( uSerial == drm->current.color_mgmt_serial && bScanoutLuts == drm->current.scanout_luts )
 		return true;
 
-	drm->pending.color_mgmt_serial = g_ColorMgmt.serial;
+	drm->pending.color_mgmt_serial = uSerial;
 
 	for ( uint32_t i = 0; i < EOTF_Count; i++ )
 	{
@@ -3554,11 +3605,11 @@ bool drm_update_color_mgmt(struct drm_t *drm)
 
 	for ( uint32_t i = 0; i < EOTF_Count; i++ )
 	{
-		if ( !g_ColorMgmtLuts[i].HasLuts() )
+		if ( !pLuts[i].HasLuts() )
 			continue;
 
-		drm->pending.shaperlut_id[ i ] = GetBackend()->CreateBackendBlob( g_ColorMgmtLuts[i].lut1d );
-		drm->pending.lut3d_id[ i ] = GetBackend()->CreateBackendBlob( g_ColorMgmtLuts[i].lut3d );
+		drm->pending.shaperlut_id[ i ] = GetBackend()->CreateBackendBlob( pLuts[i].lut1d );
+		drm->pending.lut3d_id[ i ] = GetBackend()->CreateBackendBlob( pLuts[i].lut3d );
 	}
 
 	return true;
@@ -3813,6 +3864,11 @@ bool drm_supports_color_mgmt(struct drm_t *drm)
 		return false;
 
 	return drm->pPrimaryPlane->GetProperties().AMD_PLANE_CTM.has_value() && drm->pPrimaryPlane->GetProperties().AMD_PLANE_BLEND_TF.has_value();
+}
+
+static bool drm_supports_hdr_mult(struct drm_t *drm)
+{
+	return drm_supports_color_mgmt( drm ) && drm->pPrimaryPlane->GetProperties().AMD_PLANE_HDR_MULT.has_value();
 }
 
 std::span<const uint32_t> drm_get_valid_refresh_rates( struct drm_t *drm )
