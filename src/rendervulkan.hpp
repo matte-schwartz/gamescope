@@ -584,6 +584,8 @@ extern float g_flColorMgmtScanoutHDRMult[ EOTF_Count ];
 extern uint32_t g_ColorMgmtScanoutSerial;
 // Brings the scanout LUTs and multipliers up to date with g_ColorMgmt.current.
 void ensure_scanout_color_mgmt_luts();
+// Brings g_ColorMgmtLuts up to date, call before reading them.
+void ensure_composite_color_mgmt_luts();
 
 struct VulkanOutput_t
 {

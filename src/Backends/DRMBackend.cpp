@@ -3586,6 +3586,8 @@ bool drm_update_color_mgmt(struct drm_t *drm, const FrameInfo_t *frameInfo)
 
 	if ( bScanoutLuts )
 		ensure_scanout_color_mgmt_luts();
+	else
+		ensure_composite_color_mgmt_luts();
 
 	const uint32_t uSerial = bScanoutLuts ? g_ColorMgmtScanoutSerial : g_ColorMgmt.serial;
 	const gamescope_color_mgmt_luts *pLuts = bScanoutLuts ? g_ColorMgmtLutsScanout : g_ColorMgmtLuts;

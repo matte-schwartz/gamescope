@@ -4122,8 +4122,22 @@ void bind_all_layers(CVulkanCmdBuffer* cmdBuffer, const struct FrameInfo_t *fram
 	}
 }
 
+static void ensure_frame_color_mgmt_luts( const struct FrameInfo_t *frameInfo )
+{
+	for ( uint32_t i = 0; i < EOTF_Count; i++ )
+	{
+		if ( frameInfo->lut3D[ i ] && frameInfo->lut3D[ i ] == g_ColorMgmtLuts[ i ].vk_lut3d )
+		{
+			ensure_composite_color_mgmt_luts();
+			return;
+		}
+	}
+}
+
 std::optional<uint64_t> vulkan_screenshot( const struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pScreenshotTexture, gamescope::Rc<CVulkanTexture> pYUVOutTexture )
 {
+	ensure_frame_color_mgmt_luts( frameInfo );
+
 	EOTF outputTF = frameInfo->outputEncodingEOTF;
 	if (!frameInfo->applyOutputColorMgmt)
 		outputTF = EOTF_Count; //Disable blending stuff.
@@ -4358,6 +4372,8 @@ ReshadeEffectPipeline *g_pLastReshadeEffect = nullptr;
 
 std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pPipewireTexture, bool partial, gamescope::Rc<CVulkanTexture> pOutputOverride, bool increment, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer )
 {
+	ensure_frame_color_mgmt_luts( frameInfo );
+
 	EOTF outputTF = frameInfo->outputEncodingEOTF;
 	if (!frameInfo->applyOutputColorMgmt)
 		outputTF = EOTF_Count; //Disable blending stuff.

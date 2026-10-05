@@ -461,6 +461,19 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
 	}
 }
 
+static gamescope_color_mgmt_t s_CompositeColorMgmt;
+static bool s_bCompositeLutsDirty = false;
+
+// The LUTs with the gains baked in only serve composition and the DRM path without HDR_MULT, so build them on first use.
+void ensure_composite_color_mgmt_luts()
+{
+	if ( !s_bCompositeLutsDirty )
+		return;
+
+	s_bCompositeLutsDirty = false;
+	create_color_mgmt_luts( s_CompositeColorMgmt, g_ColorMgmtLuts );
+}
+
 gamescope_color_mgmt_luts g_ColorMgmtLutsScanout[ EOTF_Count ];
 float g_flColorMgmtScanoutHDRMult[ EOTF_Count ];
 uint32_t g_ColorMgmtScanoutSerial = 0;
@@ -665,10 +678,16 @@ update_color_mgmt()
 
 	if (g_ColorMgmt.pending.enabled)
 	{
-		create_color_mgmt_luts(g_ColorMgmt.pending, g_ColorMgmtLuts);
+		s_CompositeColorMgmt = g_ColorMgmt.pending;
+		s_bCompositeLutsDirty = true;
+
+		// paint_all only hands out LUTs that exist, so the first build cannot wait.
+		if ( !g_ColorMgmtLuts[ 0 ].HasLuts() )
+			ensure_composite_color_mgmt_luts();
 	}
 	else
 	{
+		s_bCompositeLutsDirty = false;
 		for ( uint32_t i = 0; i < EOTF_Count; i++ )
 			g_ColorMgmtLuts[i].reset();
 	}
