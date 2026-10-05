@@ -343,8 +343,8 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
 		// FIXME: an override bypasses the backlight gain below, like night mode and looks.
 		if ( g_ColorMgmtLutsOverride[nInputEOTF].HasLuts() )
 		{
-			memcpy(g_ColorMgmtLuts[nInputEOTF].lut1d, g_ColorMgmtLutsOverride[nInputEOTF].lut1d, sizeof(g_ColorMgmtLutsOverride[nInputEOTF].lut1d));
-			memcpy(g_ColorMgmtLuts[nInputEOTF].lut3d, g_ColorMgmtLutsOverride[nInputEOTF].lut3d, sizeof(g_ColorMgmtLutsOverride[nInputEOTF].lut3d));
+			memcpy(outColorMgmtLuts[nInputEOTF].lut1d, g_ColorMgmtLutsOverride[nInputEOTF].lut1d, sizeof(g_ColorMgmtLutsOverride[nInputEOTF].lut1d));
+			memcpy(outColorMgmtLuts[nInputEOTF].lut3d, g_ColorMgmtLutsOverride[nInputEOTF].lut3d, sizeof(g_ColorMgmtLutsOverride[nInputEOTF].lut3d));
 		}
 		else
 		{
