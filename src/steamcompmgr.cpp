@@ -8778,7 +8778,11 @@ void xwayland_ctx_t::Dispatch()
 				steamcompmgr_win_t * w = find_win(ctx, ev.xmap.window);
 
 				if (w && w->xwayland().id == ev.xmap.window)
+				{
+					// Wine flips override-redirect while unmapped, which no other event reports.
+					w->xwayland().a.override_redirect = ev.xmap.override_redirect;
 					map_win(ctx, ev.xmap.window, ev.xmap.serial);
+				}
 				break;
 			}
 			case UnmapNotify:
