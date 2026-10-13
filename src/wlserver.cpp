@@ -301,6 +301,8 @@ static void unconstrain_popup( struct wlr_xdg_popup *popup )
 	wlr_xdg_popup_unconstrain_from_box( popup, &box );
 }
 
+static void wlserver_pointer_rebase( struct wlr_surface *root );
+
 static void wlserver_publish_surface_tree( wlserver_xdg_surface_info *info )
 {
 	struct wlr_surface *root = info->main_surface;
@@ -331,6 +333,8 @@ static void wlserver_publish_surface_tree( wlserver_xdg_surface_info *info )
 	}
 	info->bTreeDirty = true;
 	nudge_steamcompmgr();
+
+	wlserver_pointer_rebase( root );
 }
 
 void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
@@ -803,6 +807,8 @@ static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
 
 	if ( surf->wlr == wlserver.mouse_focus_surface )
 		wlserver.mouse_focus_surface = nullptr;
+	if ( surf->wlr == wlserver.pointer_leaf_surface )
+		wlserver.pointer_leaf_surface = nullptr;
 
 	wlserver_drag_anchor_forget( surf->wlr );
 
@@ -3149,6 +3155,71 @@ static void wlserver_clampcursor()
 	wlserver.mouse_surface_cursory = std::clamp( wlserver.mouse_surface_cursory, 0.0, double( std::max( nHeight - 1, 0 ) ) );
 }
 
+// The surface of a native window's tree under a root-local point, in its own coordinates.
+static struct wlr_surface *tree_surface_at( struct wlr_surface *root, double x, double y, double *sx, double *sy )
+{
+	wlserver_wl_surface_info *wl_info = get_wl_surface_info( root );
+	if ( !wl_info || !wl_info->xdg_surface )
+		return nullptr;
+
+	if ( struct wlr_xdg_surface *xdg_surface = wlr_xdg_surface_try_from_wlr_surface( root ) )
+		return wlr_xdg_surface_surface_at( xdg_surface, x, y, sx, sy );
+	if ( struct wlr_layer_surface_v1 *layer_surface = wlr_layer_surface_v1_try_from_wlr_surface( root ) )
+		return wlr_layer_surface_v1_surface_at( layer_surface, x, y, sx, sy );
+	return wlr_surface_surface_at( root, x, y, sx, sy );
+}
+
+// Moves the pointer to a root-local point, entering whichever tree surface is under it.
+static void wlserver_pointer_move( uint32_t time, double x, double y, bool bMotion )
+{
+	struct wlr_surface *leaf = wlserver.mouse_focus_surface;
+	double sx = x, sy = y;
+
+	// A held button keeps the surface it was pressed on, as on any other compositor.
+	if ( wlserver.pointer_leaf_surface && wlserver.wlr.seat->pointer_state.button_count > 0 )
+	{
+		leaf = wlserver.pointer_leaf_surface;
+		sx = x - wlserver.pointer_leaf_x;
+		sy = y - wlserver.pointer_leaf_y;
+	}
+	else if ( struct wlr_surface *hit = tree_surface_at( leaf, x, y, &sx, &sy ) )
+	{
+		leaf = hit;
+	}
+	else
+	{
+		sx = x;
+		sy = y;
+	}
+
+	if ( !leaf )
+		return;
+
+	if ( leaf != wlserver.pointer_leaf_surface )
+	{
+		wlserver.pointer_leaf_surface = leaf;
+		wlr_seat_pointer_notify_enter( wlserver.wlr.seat, leaf, sx, sy );
+	}
+	else if ( bMotion )
+	{
+		wlr_seat_pointer_notify_motion( wlserver.wlr.seat, time, sx, sy );
+	}
+	wlserver.pointer_leaf_x = x - sx;
+	wlserver.pointer_leaf_y = y - sy;
+}
+
+// A surface mapping or unmapping under a still pointer changes which one it is in.
+static void wlserver_pointer_rebase( struct wlr_surface *root )
+{
+	if ( root != wlserver.mouse_focus_surface || wlserver.wlr.seat->pointer_state.button_count > 0 )
+		return;
+
+	double sx = wlserver.mouse_surface_cursorx;
+	double sy = wlserver.mouse_surface_cursory;
+	wlserver_drag_anchor_apply( sx, sy );
+	wlserver_pointer_move( 0, sx, sy, false );
+}
+
 void wlserver_mousefocus( struct wlr_surface *wlrsurface, int x /* = 0 */, int y /* = 0 */ )
 {
 	assert( wlserver_is_lock_held() );
@@ -3177,7 +3248,9 @@ void wlserver_mousefocus( struct wlr_surface *wlrsurface, int x /* = 0 */, int y
 
 	wlserver_oncursorevent();
 	wlr_seat_pointer_warp( wlserver.wlr.seat, wlserver.mouse_surface_cursorx, wlserver.mouse_surface_cursory );
-	wlr_seat_pointer_notify_enter( wlserver.wlr.seat, wlrsurface, wlserver.mouse_surface_cursorx, wlserver.mouse_surface_cursory );
+	// Entering again is a no-op for the surface already focused, so only a new surface hears it.
+	wlserver.pointer_leaf_surface = nullptr;
+	wlserver_pointer_move( 0, wlserver.mouse_surface_cursorx, wlserver.mouse_surface_cursory, false );
 }
 
 void wlserver_clear_dropdowns()
@@ -3430,7 +3503,7 @@ void wlserver_mousemotion( double dx, double dy, uint32_t time )
 	double sy = wlserver.mouse_surface_cursory;
 	wlserver_drag_anchor_apply( sx, sy );
 
-	wlr_seat_pointer_notify_motion( wlserver.wlr.seat, time, sx, sy );
+	wlserver_pointer_move( time, sx, sy, true );
 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
 }
 
@@ -3453,7 +3526,7 @@ void wlserver_mousewarp( double x, double y, uint32_t time, bool bSynthetic )
 	double sy = wlserver.mouse_surface_cursory;
 	wlserver_drag_anchor_apply( sx, sy );
 
-	wlr_seat_pointer_notify_motion( wlserver.wlr.seat, time, sx, sy );
+	wlserver_pointer_move( time, sx, sy, true );
 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
 }
 
@@ -3621,6 +3694,11 @@ void wlserver_touchmotion( double x, double y, int touch_id, uint32_t time, bool
 		{
 			double sx = tx, sy = ty;
 			wlserver_drag_anchor_apply( sx, sy );
+			if ( auto iter = wlserver.touch_down_ids.find( touch_id ); iter != wlserver.touch_down_ids.end() )
+			{
+				sx -= iter->second.first;
+				sy -= iter->second.second;
+			}
 			wlr_seat_touch_notify_motion( wlserver.wlr.seat, time, touch_id, sx, sy );
 
 			if ( bAlwaysWarpCursor )
@@ -3672,9 +3750,22 @@ void wlserver_touchdown( double x, double y, int touch_id, uint32_t time, gamesc
 		{
 			double sx = tx, sy = ty;
 			wlserver_drag_anchor_apply( sx, sy );
-			wlr_seat_touch_notify_down( wlserver.wlr.seat, wlserver.mouse_focus_surface, time, touch_id, sx, sy );
 
-			wlserver.touch_down_ids.insert( touch_id );
+			// A touch stays on the tree surface it went down on.
+			struct wlr_surface *surface = wlserver.mouse_focus_surface;
+			const double flRootX = sx, flRootY = sy;
+			double lx, ly;
+			if ( struct wlr_surface *hit = tree_surface_at( surface, sx, sy, &lx, &ly ) )
+			{
+				surface = hit;
+				sx = lx;
+				sy = ly;
+			}
+			const double flOriginX = flRootX - sx;
+			const double flOriginY = flRootY - sy;
+			wlr_seat_touch_notify_down( wlserver.wlr.seat, surface, time, touch_id, sx, sy );
+
+			wlserver.touch_down_ids[ touch_id ] = { flOriginX, flOriginY };
 		}
 		else if ( eMode == gamescope::TouchClickModes::Disabled )
 		{

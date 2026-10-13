@@ -157,6 +157,10 @@ struct wlserver_t {
 	} wlr;
 	
 	struct wlr_surface *mouse_focus_surface;
+	// The surface of mouse_focus_surface's tree the pointer is in, and its origin in the root.
+	struct wlr_surface *pointer_leaf_surface;
+	double pointer_leaf_x;
+	double pointer_leaf_y;
 	struct wlr_surface *kb_focus_surface;
 	std::unordered_map<struct wlr_surface *, std::pair<int, int>> current_dropdown_surfaces;
 	double mouse_surface_cursorx = 0.0f;
@@ -192,7 +196,8 @@ struct wlserver_t {
 	bool bCursorHasImage = true;
 	
 	bool button_held[ WLSERVER_BUTTON_COUNT ];
-	std::set <uint32_t> touch_down_ids;
+	// Origin in the root of the surface each passthrough touch went down on.
+	std::map <uint32_t, std::pair<double, double>> touch_down_ids;
 
 	// Moves a client made to the surface under the pointer during the current
 	// press, taken back out of the pointer position so its root position holds.
