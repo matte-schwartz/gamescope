@@ -250,13 +250,55 @@ static void discard_pending_commits( struct wlr_surface *surface )
 	} );
 }
 
-// Popups belong to their xdg surface's tree, plain subsurfaces to any root.
+// Popups belong to their xdg or layer surface's tree, plain subsurfaces to any root.
 static void for_each_tree_surface( struct wlr_surface *root, wlr_surface_iterator_func_t iterator, void *data )
 {
 	if ( struct wlr_xdg_surface *xdg_surface = wlr_xdg_surface_try_from_wlr_surface( root ) )
 		wlr_xdg_surface_for_each_surface( xdg_surface, iterator, data );
+	else if ( struct wlr_layer_surface_v1 *layer_surface = wlr_layer_surface_v1_try_from_wlr_surface( root ) )
+		wlr_layer_surface_v1_for_each_surface( layer_surface, iterator, data );
 	else
 		wlr_surface_for_each_surface( root, iterator, data );
+}
+
+// The window surface a subsurface or popup belongs to, through any nesting of the two.
+static struct wlr_surface *tree_root_surface( struct wlr_surface *surface )
+{
+	for ( ;; )
+	{
+		surface = wlr_surface_get_root_surface( surface );
+		struct wlr_xdg_popup *popup = wlr_xdg_popup_try_from_wlr_surface( surface );
+		if ( !popup || !popup->parent )
+			return surface;
+		surface = popup->parent;
+	}
+}
+
+static wlserver_xdg_surface_info *tree_root_info( struct wlr_surface *surface )
+{
+	wlserver_wl_surface_info *wl_info = get_wl_surface_info( tree_root_surface( surface ) );
+	return wl_info && wl_info->xdg_surface && wl_info->xdg_surface->win ? wl_info->xdg_surface : nullptr;
+}
+
+static wlserver_xdg_surface_info *xdg_info_from_win_seq( uint64_t ulWinSeq )
+{
+	std::unique_lock lock( g_wlserver_xdg_shell_windows_lock );
+	for ( const auto &pWindow : wlserver.xdg_wins )
+	{
+		if ( pWindow->seq == ulWinSeq )
+			return &pWindow->xdg().surface;
+	}
+	return nullptr;
+}
+
+// Keeps a popup inside its window, which is all that is ever on screen of it.
+static void unconstrain_popup( struct wlr_xdg_popup *popup )
+{
+	struct wlr_surface *root = tree_root_surface( popup->base->surface );
+	struct wlr_box box = { 0, 0, root->current.width, root->current.height };
+	if ( struct wlr_xdg_surface *root_xdg = wlr_xdg_surface_try_from_wlr_surface( root ) )
+		box = root_xdg->geometry;
+	wlr_xdg_popup_unconstrain_from_box( popup, &box );
 }
 
 static void wlserver_publish_surface_tree( wlserver_xdg_surface_info *info )
@@ -294,8 +336,27 @@ static void wlserver_publish_surface_tree( wlserver_xdg_surface_info *info )
 void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 	wlr_surface->current.committed = 0;
 
-	wlserver_x11_surface_info *wlserver_x11_surface_info = get_wl_surface_info(wlr_surface)->x11_surface;
-	wlserver_xdg_surface_info *wlserver_xdg_surface_info = get_wl_surface_info(wlr_surface)->xdg_surface;
+	wlserver_wl_surface_info *wl_info = get_wl_surface_info(wlr_surface);
+	wlserver_x11_surface_info *wlserver_x11_surface_info = wl_info->x11_surface;
+	wlserver_xdg_surface_info *wlserver_xdg_surface_info = wl_info->xdg_surface;
+
+	// Subsurfaces and popups of a native window commit into its tree, struct as a local shadows the type.
+	struct wlserver_xdg_surface_info *tree_info = nullptr;
+	if ( !wlserver_x11_surface_info && !wlserver_xdg_surface_info )
+	{
+		if ( struct wlr_xdg_popup *popup = wlr_xdg_popup_try_from_wlr_surface( wlr_surface ) )
+		{
+			if ( popup->base->initial_commit )
+				unconstrain_popup( popup );
+		}
+
+		tree_info = tree_root_info( wlr_surface );
+		if ( tree_info )
+		{
+			wl_info->ulTreeWinSeq = tree_info->win->seq;
+			wlserver_publish_surface_tree( tree_info );
+		}
+	}
 
 	if ( wlserver_xdg_surface_info )
 	{
@@ -333,8 +394,11 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 		assert(wlserver_x11_surface_info->xwayland_server);
 		wlserver_x11_surface_info->xwayland_server->wayland_commit( std::move( entry ) );
 	}
-	else if (wlserver_xdg_surface_info)
+	else if (wlserver_xdg_surface_info || tree_info)
 	{
+		entry.ulWinSeq = ( wlserver_xdg_surface_info ? wlserver_xdg_surface_info : tree_info )->win->seq;
+		if ( tree_info )
+			discard_pending_commits( wlr_surface );
 		wlserver_xdg_commit( std::move( entry ) );
 	}
 	else
@@ -783,9 +847,28 @@ static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
 	}
 
 	wl_list_remove( &surf->commit.link );
+	wl_list_remove( &surf->unmap.link );
 	wl_list_remove( &surf->destroy.link );
 
 	delete surf;
+}
+
+// wlroots unmaps a surface before destroying it, so this also covers destruction.
+static void handle_wl_surface_unmap( struct wl_listener *l, void *data )
+{
+	wlserver_wl_surface_info *surf = wl_container_of( l, surf, unmap );
+	if ( !surf->ulTreeWinSeq )
+		return;
+
+	// Lets steamcompmgr drop the surface's commits, which pin its buffers.
+	ResListEntry_t gone = {};
+	gone.surf = surf->wlr;
+	gone.ulSurfaceSerial = surf->ulSerial;
+	gone.ulWinSeq = surf->ulTreeWinSeq;
+	wlserver_xdg_commit( std::move( gone ) );
+
+	if ( wlserver_xdg_surface_info *info = xdg_info_from_win_seq( surf->ulTreeWinSeq ) )
+		wlserver_publish_surface_tree( info );
 }
 
 static void wlserver_new_surface(struct wl_listener *l, void *data)
@@ -804,6 +887,9 @@ static void wlserver_new_surface(struct wl_listener *l, void *data)
 
 	wl_surface_info->commit.notify = handle_wl_surface_commit;
 	wl_signal_add( &wlr_surf->events.commit, &wl_surface_info->commit );
+
+	wl_surface_info->unmap.notify = handle_wl_surface_unmap;
+	wl_signal_add( &wlr_surf->events.unmap, &wl_surface_info->unmap );
 
 	wlr_surf->data = wl_surface_info;
 
@@ -2191,9 +2277,6 @@ static void waylandy_surface_destroy(struct wl_listener *listener, void *data) {
 		wlserver_surface->xdg_surface = nullptr;
 }
 
-void xdg_toplevel_new(struct wl_listener *listener, void *data)
-{
-}
 
 wlserver_xdg_surface_info* waylandy_type_surface_new(struct wl_client *client, struct wlr_surface *surface)
 {
@@ -2236,9 +2319,13 @@ wlserver_xdg_surface_info* waylandy_type_surface_new(struct wl_client *client, s
 
 	for (auto it = g_PendingCommits.begin(); it != g_PendingCommits.end();)
 	{
-		if (it->surf == surface)
+		// Subsurfaces that committed before their root became a window waited here too.
+		if (it->surf == surface || tree_root_surface( it->surf ) == surface)
 		{
 			ResListEntry_t pending = std::move( *it );
+			pending.ulWinSeq = window->seq;
+			if ( pending.surf != surface )
+				get_wl_surface_info( pending.surf )->ulTreeWinSeq = window->seq;
 
 			wlserver_xdg_commit( std::move( pending ) );
 
@@ -2253,15 +2340,51 @@ wlserver_xdg_surface_info* waylandy_type_surface_new(struct wl_client *client, s
 	return xdg_surface_info;
 }
 
-void xdg_surface_new(struct wl_listener *listener, void *data)
+// Only toplevels are windows, popups are painted as part of their toplevel.
+void xdg_toplevel_new(struct wl_listener *listener, void *data)
 {
-	struct wlr_xdg_surface *xdg_surface = (struct wlr_xdg_surface *)data;
+	struct wlr_xdg_toplevel *toplevel = (struct wlr_xdg_toplevel *)data;
+	struct wlr_xdg_surface *xdg_surface = toplevel->base;
 
 	wlserver_xdg_surface_info *surface_info = waylandy_type_surface_new(xdg_surface->client->client, xdg_surface->surface);
+	if ( !surface_info )
+		return;
+
 	surface_info->destroy.notify = waylandy_surface_destroy;
 	wl_signal_add(&xdg_surface->events.destroy, &surface_info->destroy);
 
 	surface_info->xdg_surface = xdg_surface;
+}
+
+struct wlserver_xdg_popup
+{
+	struct wlr_xdg_popup *popup;
+	struct wl_listener reposition;
+	struct wl_listener destroy;
+};
+
+static void xdg_popup_reposition( struct wl_listener *listener, void *data )
+{
+	wlserver_xdg_popup *popup = wl_container_of( listener, popup, reposition );
+	unconstrain_popup( popup->popup );
+}
+
+static void xdg_popup_destroy( struct wl_listener *listener, void *data )
+{
+	wlserver_xdg_popup *popup = wl_container_of( listener, popup, destroy );
+	wl_list_remove( &popup->reposition.link );
+	wl_list_remove( &popup->destroy.link );
+	delete popup;
+}
+
+void xdg_popup_new( struct wl_listener *listener, void *data )
+{
+	wlserver_xdg_popup *popup = new wlserver_xdg_popup;
+	popup->popup = (struct wlr_xdg_popup *)data;
+	popup->reposition.notify = xdg_popup_reposition;
+	wl_signal_add( &popup->popup->events.reposition, &popup->reposition );
+	popup->destroy.notify = xdg_popup_destroy;
+	wl_signal_add( &popup->popup->events.destroy, &popup->destroy );
 }
 
 
@@ -2465,10 +2588,10 @@ bool wlserver_init( void ) {
 		wl_log.infof("Unable to create XDG shell interface");
 		return false;
 	}
-	wlserver.new_xdg_surface.notify = xdg_surface_new;
 	wlserver.new_xdg_toplevel.notify = xdg_toplevel_new;
-	wl_signal_add(&wlserver.xdg_shell->events.new_surface, &wlserver.new_xdg_surface);
+	wlserver.new_xdg_popup.notify = xdg_popup_new;
 	wl_signal_add(&wlserver.xdg_shell->events.new_toplevel, &wlserver.new_xdg_toplevel);
+	wl_signal_add(&wlserver.xdg_shell->events.new_popup, &wlserver.new_xdg_popup);
 
 	wlserver.layer_shell_v1 = wlr_layer_shell_v1_create(wlserver.display, 4);
 	if (!wlserver.layer_shell_v1)
@@ -2688,8 +2811,8 @@ void wlserver_run(void)
 	wl_list_remove( &new_surface_listener.link );
 	wl_list_remove( &new_input_listener.link );
 	wl_list_remove( &wlserver.new_pointer_constraint.link );
-	wl_list_remove( &wlserver.new_xdg_surface.link );
 	wl_list_remove( &wlserver.new_xdg_toplevel.link );
+	wl_list_remove( &wlserver.new_xdg_popup.link );
 	wl_list_remove( &wlserver.new_layer_shell_surface.link );
 
 #if HAVE_SESSION

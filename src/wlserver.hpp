@@ -70,6 +70,8 @@ struct ResListEntry_t {
 	std::vector<pixman_box32_t> damage;
 	uint64_t ulSurfaceSerial = 0;
 	wlserver_surface_state surfaceState;
+	// The native window this commit belongs to, 0 to match by surface.
+	uint64_t ulWinSeq = 0;
 };
 
 struct wlserver_content_override;
@@ -220,8 +222,8 @@ struct wlserver_t {
 	struct wlr_layer_shell_v1 *layer_shell_v1;
 	struct wlr_relative_pointer_manager_v1 *relative_pointer_manager;
 	struct wlr_pointer_constraints_v1 *constraints;
-	struct wl_listener new_xdg_surface;
 	struct wl_listener new_xdg_toplevel;
+	struct wl_listener new_xdg_popup;
 	struct wl_listener new_layer_shell_surface;
 	struct wl_listener new_pointer_constraint;
 	std::vector<std::shared_ptr<steamcompmgr_win_t>> xdg_wins;

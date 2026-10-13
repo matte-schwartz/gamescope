@@ -8994,12 +8994,30 @@ void check_new_xdg_res()
 		steamcompmgr_win_t *w = nullptr;
 		for ( const auto &xdg_win : g_steamcompmgr_xdg_wins )
 		{
-			if ( xdg_win->xdg().surface.main_surface == entry.surf )
+			if ( entry.ulWinSeq ? xdg_win->seq == entry.ulWinSeq : xdg_win->xdg().surface.main_surface == entry.surf )
 			{
 				w = xdg_win.get();
 				break;
 			}
 		}
+
+		// A subsurface or popup went away, drop the commits that pin its buffers.
+		if ( !entry.buf )
+		{
+			if ( w )
+			{
+				std::erase_if( w->commit_queue, [ &entry ]( const gamescope::Rc<commit_t> &pCommit )
+				{
+					return pCommit->stream == entry.ulSurfaceSerial;
+				} );
+				// The next paint picks a new base from what is left.
+				if ( w->xdg().ulBaseStream == entry.ulSurfaceSerial )
+					w->xdg().ulBaseStream = 0;
+				hasRepaint = true;
+			}
+			continue;
+		}
+
 		update_wayland_res( g_steamcompmgr_xdg_done_commits, w, entry );
 	}
 }

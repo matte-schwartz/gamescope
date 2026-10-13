@@ -65,7 +65,10 @@ struct wlserver_wl_surface_info
 	struct wlr_surface *wlr = nullptr;
 	// Never reused, unlike the wlr_surface address.
 	uint64_t ulSerial = 0;
+	// The native window whose tree this subsurface or popup last committed into.
+	uint64_t ulTreeWinSeq = 0;
 	struct wl_listener commit;
+	struct wl_listener unmap;
 	struct wl_listener destroy;
 
 	std::shared_ptr<wlserver_vk_swapchain_feedback> swapchain_feedback = {};
