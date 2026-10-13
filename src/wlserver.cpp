@@ -46,6 +46,7 @@
 #include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_viewporter.h>
 #include <wlr/util/region.h>
 #include "wlr_end.hpp"
 
@@ -2030,6 +2031,17 @@ static bool filter_global(const struct wl_client *client, const struct wl_global
 	if ( cv_drm_debug_disable_explicit_sync && iface->name == "wp_linux_drm_syncobj_manager_v1"sv )
 		return false;
 
+	// Xwayland would scale our X-space pointer coordinates by its mode emulation viewport.
+	if ( iface->name == "wp_viewporter"sv )
+	{
+		for ( const auto &server : wlserver.wlr.xwayland_servers )
+		{
+			if ( server && server->get_client() == client )
+				return false;
+		}
+		return true;
+	}
+
 	if (strcmp(iface->name, wl_output_interface.name) != 0)
 		return true;
 
@@ -2587,6 +2599,12 @@ bool wlserver_init( void ) {
 	wl_signal_add(&wlserver.constraints->events.new_constraint, &wlserver.new_pointer_constraint);
 
 	wlr_data_device_manager_create(wlserver.display);
+
+	if ( !wlr_viewporter_create( wlserver.display ) )
+	{
+		wl_log.errorf( "Unable to create viewporter interface" );
+		return false;
+	}
 
 	wlserver.xdg_shell = wlr_xdg_shell_create(wlserver.display, 3);
 	if (!wlserver.xdg_shell)
