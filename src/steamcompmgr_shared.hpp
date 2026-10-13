@@ -56,7 +56,6 @@ struct wlserver_xdg_surface_info
 	struct wlr_xdg_surface *xdg_surface = nullptr;
 	struct wlr_layer_surface_v1 *layer_surface = nullptr;
 	steamcompmgr_win_t *win = nullptr;
-	bool bDoneConfigure = false;
 
 	std::atomic<bool> mapped = { false };
 

@@ -229,16 +229,14 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 
 	if ( wlserver_xdg_surface_info )
 	{
-		if ( !wlserver_xdg_surface_info->bDoneConfigure )
-		{
-			if ( wlserver_xdg_surface_info->xdg_surface )
-				wlr_xdg_surface_schedule_configure( wlserver_xdg_surface_info->xdg_surface );
+		// wlroots clears initialized on a NULL-buffer unmap, so a remap gets configured again.
+		struct wlr_xdg_surface *xdg_surface = wlserver_xdg_surface_info->xdg_surface;
+		if ( xdg_surface && xdg_surface->initial_commit )
+			wlr_xdg_surface_schedule_configure( xdg_surface );
 
-			if ( wlserver_xdg_surface_info->layer_surface )
-				wlr_layer_surface_v1_configure( wlserver_xdg_surface_info->layer_surface, g_nNestedWidth, g_nNestedHeight );
-
-			wlserver_xdg_surface_info->bDoneConfigure = true;
-		}
+		struct wlr_layer_surface_v1 *layer_surface = wlserver_xdg_surface_info->layer_surface;
+		if ( layer_surface && layer_surface->initial_commit )
+			wlr_layer_surface_v1_configure( layer_surface, g_nNestedWidth, g_nNestedHeight );
 	}
 
 	// Committing without buffer state is valid and commits the same buffer again.
