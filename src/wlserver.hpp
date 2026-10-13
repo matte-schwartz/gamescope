@@ -39,6 +39,23 @@ struct GamescopeAcquireTimelineState
 	bool bKnownReady = false;
 };
 
+// What a buffer shows on its surface, captured with the commit.
+struct wlserver_surface_state
+{
+	// Logical size, after buffer scale and viewport.
+	int32_t nWidth = 0;
+	int32_t nHeight = 0;
+	// Buffer-space source box.
+	float flSrcX = 0.0f;
+	float flSrcY = 0.0f;
+	float flSrcWidth = 0.0f;
+	float flSrcHeight = 0.0f;
+	// The opaque region covers the whole surface.
+	bool bOpaque = false;
+
+	bool operator==( const wlserver_surface_state & ) const = default;
+};
+
 struct ResListEntry_t {
 	struct wlr_surface *surf;
 	struct wlr_buffer *buf;
@@ -52,6 +69,7 @@ struct ResListEntry_t {
 	pixman_box32_t damageExtents;
 	std::vector<pixman_box32_t> damage;
 	uint64_t ulSurfaceSerial = 0;
+	wlserver_surface_state surfaceState;
 };
 
 struct wlserver_content_override;
@@ -286,6 +304,7 @@ void wlserver_touchdown( double x, double y, int touch_id, uint32_t time, gamesc
 void wlserver_touchup( int touch_id, uint32_t time );
 
 void wlserver_send_frame_done( struct wlr_surface *surf, const struct timespec *when );
+void wlserver_send_frame_done_tree( struct wlr_surface *root, const struct timespec *when );
 
 bool wlserver_surface_is_async( struct wlr_surface *surf );
 bool wlserver_surface_is_fifo( struct wlr_surface *surf );
@@ -324,6 +343,7 @@ extern LogScope present_timing_log;
 void wlserver_present_timing_report( gamescope::PresentTiming &timing, uint64_t queue_end, uint64_t dequeued, uint64_t pixel_out, uint64_t earliest_present_time, uint64_t earliest_latch_time );
 void wlserver_present_timing_discard( gamescope::PresentTiming &timing );
 void wlserver_refresh_cycle( struct wlr_surface *surface, uint64_t refresh_cycle, uint64_t refresh_interval );
+void wlserver_refresh_cycle_tree( struct wlr_surface *root, uint64_t refresh_cycle, uint64_t refresh_interval );
 
 void wlserver_app_presented( uint32_t app_id, uint64_t frametime_ns );
 

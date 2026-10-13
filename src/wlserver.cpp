@@ -178,6 +178,20 @@ ResListEntry_t PrepareCommit( struct wlr_surface *surf, struct wlr_buffer *buf )
 	};
 	newEntry.damageExtents = *pixman_region32_extents( &surf->buffer_damage );
 	newEntry.ulSurfaceSerial = wl_surf->ulSerial;
+
+	struct wlr_fbox srcBox;
+	wlr_surface_get_buffer_source_box( surf, &srcBox );
+	pixman_box32_t surfaceBox = { 0, 0, surf->current.width, surf->current.height };
+	newEntry.surfaceState = wlserver_surface_state
+	{
+		.nWidth = surf->current.width,
+		.nHeight = surf->current.height,
+		.flSrcX = float( srcBox.x ),
+		.flSrcY = float( srcBox.y ),
+		.flSrcWidth = float( srcBox.width ),
+		.flSrcHeight = float( srcBox.height ),
+		.bOpaque = pixman_region32_contains_rectangle( &surf->opaque_region, &surfaceBox ) == PIXMAN_REGION_IN,
+	};
 	if ( wl_surf->x11_surface && wl_surf->x11_surface->override_surface && wl_surf->x11_surface->override_surface != surf )
 	{
 		int nDamageRects = 0;
@@ -236,6 +250,47 @@ static void discard_pending_commits( struct wlr_surface *surface )
 	} );
 }
 
+// Popups belong to their xdg surface's tree, plain subsurfaces to any root.
+static void for_each_tree_surface( struct wlr_surface *root, wlr_surface_iterator_func_t iterator, void *data )
+{
+	if ( struct wlr_xdg_surface *xdg_surface = wlr_xdg_surface_try_from_wlr_surface( root ) )
+		wlr_xdg_surface_for_each_surface( xdg_surface, iterator, data );
+	else
+		wlr_surface_for_each_surface( root, iterator, data );
+}
+
+static void wlserver_publish_surface_tree( wlserver_xdg_surface_info *info )
+{
+	struct wlr_surface *root = info->main_surface;
+	if ( !root )
+		return;
+
+	auto pTree = std::make_shared<wlserver_surface_tree>();
+	if ( info->xdg_surface )
+		pTree->geometry = info->xdg_surface->geometry;
+	else
+		pTree->geometry = wlr_box{ 0, 0, root->current.width, root->current.height };
+
+	if ( info->mapped )
+	{
+		for_each_tree_surface( root, []( struct wlr_surface *surface, int sx, int sy, void *data )
+		{
+			if ( wlserver_wl_surface_info *wl_info = get_wl_surface_info( surface ) )
+				static_cast<wlserver_surface_tree *>( data )->nodes.push_back( { wl_info->ulSerial, sx, sy } );
+		}, pTree.get() );
+	}
+
+	// Most commits are content only, so skip waking steamcompmgr for an unchanged layout.
+	{
+		std::lock_guard lock( info->treeLock );
+		if ( info->pTree && *info->pTree == *pTree )
+			return;
+		info->pTree = std::move( pTree );
+	}
+	info->bTreeDirty = true;
+	nudge_steamcompmgr();
+}
+
 void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 	wlr_surface->current.committed = 0;
 
@@ -252,6 +307,9 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 		struct wlr_layer_surface_v1 *layer_surface = wlserver_xdg_surface_info->layer_surface;
 		if ( layer_surface && layer_surface->initial_commit )
 			wlr_layer_surface_v1_configure( layer_surface, g_nNestedWidth, g_nNestedHeight );
+
+		// Before the entry is queued, so its layout is never older than its buffer.
+		wlserver_publish_surface_tree( wlserver_xdg_surface_info );
 	}
 
 	// Committing without buffer state is valid and commits the same buffer again.
@@ -1799,6 +1857,29 @@ void wlserver_refresh_cycle( struct wlr_surface *surface, uint64_t refresh_cycle
 	}
 }
 
+void wlserver_refresh_cycle_tree( struct wlr_surface *root, uint64_t refresh_cycle, uint64_t refresh_interval )
+{
+	struct RefreshCycle_t
+	{
+		uint64_t ulCycle;
+		uint64_t ulInterval;
+	} refresh = { refresh_cycle, refresh_interval };
+
+	for_each_tree_surface( root, []( struct wlr_surface *surface, int, int, void *data )
+	{
+		const RefreshCycle_t *pRefresh = static_cast<const RefreshCycle_t *>( data );
+		wlserver_wl_surface_info *wl_info = get_wl_surface_info( surface );
+		if ( !wl_info || wl_info->gamescope_swapchains.empty() )
+			return;
+		if ( wl_info->last_refresh_cycle == pRefresh->ulCycle && wl_info->last_refresh_interval == pRefresh->ulInterval )
+			return;
+
+		wl_info->last_refresh_cycle = pRefresh->ulCycle;
+		wl_info->last_refresh_interval = pRefresh->ulInterval;
+		wlserver_refresh_cycle( surface, pRefresh->ulCycle, pRefresh->ulInterval );
+	}, &refresh );
+}
+
 ///////////////////////
 
 #if HAVE_SESSION
@@ -2077,6 +2158,7 @@ static void xdg_surface_map(struct wl_listener *listener, void *data) {
 
 	info->mapped = true;
 	wlserver.xdg_dirty = true;
+	wlserver_publish_surface_tree( info );
 }
 
 static void xdg_surface_unmap(struct wl_listener *listener, void *data) {
@@ -2085,6 +2167,7 @@ static void xdg_surface_unmap(struct wl_listener *listener, void *data) {
 
 	info->mapped = false;
 	wlserver.xdg_dirty = true;
+	wlserver_publish_surface_tree( info );
 }
 
 static void waylandy_surface_destroy(struct wl_listener *listener, void *data) {
@@ -3285,6 +3368,16 @@ void wlserver_send_frame_done( struct wlr_surface *surf, const struct timespec *
 	assert( wlserver_is_lock_held() );
 
 	wlr_surface_send_frame_done( surf, when );
+}
+
+void wlserver_send_frame_done_tree( struct wlr_surface *root, const struct timespec *when )
+{
+	assert( wlserver_is_lock_held() );
+
+	for_each_tree_surface( root, []( struct wlr_surface *surface, int, int, void *data )
+	{
+		wlr_surface_send_frame_done( surface, static_cast<const struct timespec *>( data ) );
+	}, const_cast<struct timespec *>( when ) );
 }
 
 bool wlserver_surface_is_async( struct wlr_surface *surf )

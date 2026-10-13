@@ -41,6 +41,29 @@ struct wlserver_x11_surface_info
 	gamescope_xwayland_server_t *xwayland_server;
 };
 
+// A native window's mapped surfaces, bottom to top, in root surface coordinates.
+struct wlserver_surface_tree
+{
+	struct Node_t
+	{
+		uint64_t ulSerial;
+		int32_t nX;
+		int32_t nY;
+
+		bool operator==( const Node_t & ) const = default;
+	};
+
+	struct wlr_box geometry = {};
+	std::vector<Node_t> nodes;
+
+	bool operator==( const wlserver_surface_tree &other ) const
+	{
+		return geometry.x == other.geometry.x && geometry.y == other.geometry.y &&
+			geometry.width == other.geometry.width && geometry.height == other.geometry.height &&
+			nodes == other.nodes;
+	}
+};
+
 // not always an xdg window anymore
 // wayland-y window (not xwayland)
 struct wlserver_xdg_surface_info
@@ -58,6 +81,11 @@ struct wlserver_xdg_surface_info
 	steamcompmgr_win_t *win = nullptr;
 
 	std::atomic<bool> mapped = { false };
+
+	// Published by wlserver, adopted by steamcompmgr when dirty.
+	std::mutex treeLock;
+	std::shared_ptr<const wlserver_surface_tree> pTree;
+	std::atomic<bool> bTreeDirty = { false };
 
 	struct wl_list link;
 
@@ -96,6 +124,13 @@ struct steamcompmgr_xdg_win_t
 
 	struct wlserver_xdg_surface_info surface;
 	struct wlr_box geometry;
+
+	// steamcompmgr's copy of the published tree.
+	std::shared_ptr<const wlserver_surface_tree> pTree;
+	uint64_t ulTreeSerial = 0;
+	// Stream painted as the base plane, 0 until the tree has been resolved.
+	uint64_t ulBaseStream = 0;
+	bool bPlainBase = false;
 };
 
 struct Rect

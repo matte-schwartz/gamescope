@@ -74,6 +74,7 @@ struct commit_t final : public gamescope::RcObject, public gamescope::IWaitable,
 	uint64_t win_seq = 0;
 	// Commits only supersede older ones of the same stream, 0 for the whole window.
 	uint64_t stream = 0;
+	wlserver_surface_state surfaceState;
 	struct wlr_surface *surf = nullptr;
 	std::vector<wlserver_presentation_feedback_ref> presentation_feedbacks;
 

@@ -102,6 +102,7 @@
 #include "Utils/Process.h"
 #include "Utils/PresentTiming.h"
 #include "Utils/CommitQueue.h"
+#include "Utils/SurfaceTree.h"
 
 #include "wlr_begin.hpp"
 #include "wlr/types/wlr_pointer_constraints_v1.h"
@@ -992,6 +993,11 @@ struct BaseLayerInfo_t
 	// pre-emptively upscaled texture is output sized and needs no transform.
 	float windowScale[2] = { 1.0f, 1.0f };
 	float windowOffset[2] = {};
+	// The raw texture's layer transform and crop. Only a native window's
+	// surface tree maps its base layer differently from the window.
+	float layerScale[2] = { 1.0f, 1.0f };
+	float layerOffset[2] = {};
+	FrameInfo_t::Layer_t::SrcRect_t srcRect;
 	float opacity;
 	GamescopeUpscaleFilter filter;
 	// The requested upscale settings, to pick the commit's upscaled texture
@@ -1873,13 +1879,27 @@ import_commit (
 	return commit;
 }
 
+// The stream a window paints as its base plane, 0 for any.
+static uint64_t
+window_base_stream( steamcompmgr_win_t *w )
+{
+	return w->type == steamcompmgr_win_type_t::XDG ? w->xdg().ulBaseStream : 0;
+}
+
+static bool
+commit_is_base_stream( steamcompmgr_win_t *w, const commit_t &commit )
+{
+	const uint64_t ulBaseStream = window_base_stream( w );
+	return !ulBaseStream || commit.stream == ulBaseStream;
+}
+
 static int32_t
 window_last_done_commit_index( steamcompmgr_win_t *w )
 {
 	int32_t lastCommit = -1;
 	for ( uint32_t i = 0; i < w->commit_queue.size(); i++ )
 	{
-		if ( w->commit_queue[ i ]->done )
+		if ( w->commit_queue[ i ]->done && commit_is_base_stream( w, *w->commit_queue[ i ] ) )
 		{
 			lastCommit = i;
 		}
@@ -1888,10 +1908,26 @@ window_last_done_commit_index( steamcompmgr_win_t *w )
 	return lastCommit;
 }
 
+// The newest done commit of one stream.
+static gamescope::Rc<commit_t>
+window_last_done_stream_commit( steamcompmgr_win_t *w, uint64_t ulStream )
+{
+	for ( auto iter = w->commit_queue.rbegin(); iter != w->commit_queue.rend(); ++iter )
+	{
+		if ( (*iter)->done && (*iter)->stream == ulStream )
+			return *iter;
+	}
+	return nullptr;
+}
+
 static bool
 window_has_commits( steamcompmgr_win_t *w )
 {
-	return window_last_done_commit_index( w ) != -1;
+	// Any content, whichever stream ends up as the base.
+	return std::any_of( w->commit_queue.begin(), w->commit_queue.end(), []( const gamescope::Rc<commit_t> &pCommit )
+	{
+		return pCommit->done;
+	} );
 }
 
 static void
@@ -1926,6 +1962,18 @@ window_last_done_commit_id( steamcompmgr_win_t *w )
 {
 	if ( !w )
 		return 0;
+
+	// A native window's content changes with any of its surfaces or its layout.
+	if ( w->type == steamcompmgr_win_type_t::XDG && w->xdg().pTree )
+	{
+		uint64_t ulContentId = w->xdg().ulTreeSerial;
+		for ( const auto &pCommit : w->commit_queue )
+		{
+			if ( pCommit->done )
+				ulContentId = ulContentId * 31 + pCommit->commitID;
+		}
+		return ulContentId;
+	}
 
 	commit_t *pCommit = get_window_last_done_commit_peek( w );
 	if ( !pCommit )
@@ -2488,10 +2536,13 @@ paint_cached_base_layer(const gamescope::Rc<commit_t>& commit, const BaseLayerIn
 	{
 		if ( base.uOutputWidth == currentOutputWidth && base.uOutputHeight == currentOutputHeight )
 		{
-			layer->scale.x = base.windowScale[0];
-			layer->scale.y = base.windowScale[1];
-			layer->offset.x = base.windowOffset[0];
-			layer->offset.y = base.windowOffset[1];
+			layer->scale.x = base.layerScale[0];
+			layer->scale.y = base.layerScale[1];
+			layer->offset.x = base.layerOffset[0];
+			layer->offset.y = base.layerOffset[1];
+			layer->srcRect = base.srcRect;
+			frameInfo->focusedWindowScale = { base.windowScale[0], base.windowScale[1] };
+			frameInfo->focusedWindowOffset = { base.windowOffset[0], base.windowOffset[1] };
 		}
 		else
 		{
@@ -2503,9 +2554,9 @@ paint_cached_base_layer(const gamescope::Rc<commit_t>& commit, const BaseLayerIn
 			layer->scale.y = 1.0f / flScaleY;
 			layer->offset.x = -( ( (int)currentOutputWidth - (int)layer->tex->width() * flScaleX ) / 2.0f );
 			layer->offset.y = -( ( (int)currentOutputHeight - (int)layer->tex->height() * flScaleY ) / 2.0f );
+			frameInfo->focusedWindowScale = { layer->scale.x, layer->scale.y };
+			frameInfo->focusedWindowOffset = { layer->offset.x, layer->offset.y };
 		}
-		frameInfo->focusedWindowScale = { layer->scale.x, layer->scale.y };
-		frameInfo->focusedWindowOffset = { layer->offset.x, layer->offset.y };
 	}
 	else
 	{
@@ -2748,13 +2799,148 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
 	return layer;
 }
 
+// Fits the window geometry to the output the way paint_window_commit fits a buffer.
+static gamescope::SurfaceTree::Fit_t
+fit_surface_tree( const wlr_box &geometry, struct FrameInfo_t *frameInfo, MouseCursor *cursor, PaintWindowFlags flags )
+{
+	gamescope::SurfaceTree::Fit_t fit;
+	fit.geometry = { geometry.x, geometry.y, geometry.width, geometry.height };
+
+	if ( flags & PaintWindowFlag::NoScale )
+		return fit;
+
+	const int32_t nWidth = geometry.width;
+	const int32_t nHeight = geometry.height;
+	if ( nWidth != (int32_t)currentOutputWidth || nHeight != (int32_t)currentOutputHeight || globalScaleRatio != 1.0f )
+	{
+		float flScaleX = 1.0f, flScaleY = 1.0f;
+		calc_scale_factor( frameInfo->eUpscaleScaler, flScaleX, flScaleY, nWidth, nHeight );
+
+		int nOffsetX = ( (int)currentOutputWidth - (int)nWidth * flScaleX ) / 2.0f;
+		int nOffsetY = ( (int)currentOutputHeight - (int)nHeight * flScaleY ) / 2.0f;
+		if ( zoomScaleRatio != 1.0 )
+		{
+			nOffsetX += ( ( (int)nWidth / 2 ) - ( cursor ? cursor->x() : 0 ) ) * flScaleX;
+			nOffsetY += ( ( (int)nHeight / 2 ) - ( cursor ? cursor->y() : 0 ) ) * flScaleY;
+		}
+
+		fit.scale = { flScaleX, flScaleY };
+		fit.offset = { float( nOffsetX ), float( nOffsetY ) };
+	}
+	return fit;
+}
+
+// Paints a native window's surface tree and returns its base layer and commit.
+static FrameInfo_t::Layer_t *
+paint_surface_tree( steamcompmgr_win_t *w, struct FrameInfo_t *frameInfo, MouseCursor *cursor, PaintWindowFlags flags,
+	float flOpacityScale, int nReservedLayers, gamescope::Rc<commit_t> &baseCommit )
+{
+	steamcompmgr_xdg_win_t &xdg = w->xdg();
+	const wlserver_surface_tree &tree = *xdg.pTree;
+
+	std::vector<gamescope::SurfaceTree::Node_t> nodes;
+	std::vector<gamescope::Rc<commit_t>> commits;
+	nodes.reserve( tree.nodes.size() );
+	commits.reserve( tree.nodes.size() );
+	for ( const wlserver_surface_tree::Node_t &treeNode : tree.nodes )
+	{
+		gamescope::Rc<commit_t> pCommit = window_last_done_stream_commit( w, treeNode.ulSerial );
+
+		gamescope::SurfaceTree::Node_t node;
+		if ( pCommit )
+		{
+			const wlserver_surface_state &state = pCommit->surfaceState;
+			node.rect = { treeNode.nX, treeNode.nY, state.nWidth, state.nHeight };
+			node.flSrcX = state.flSrcX;
+			node.flSrcY = state.flSrcY;
+			node.flSrcW = state.flSrcWidth;
+			node.flSrcH = state.flSrcHeight;
+			node.uBufferWidth = pCommit->vulkanTex->width();
+			node.uBufferHeight = pCommit->vulkanTex->height();
+			node.bOpaque = state.bOpaque;
+			node.bHasContent = true;
+		}
+		nodes.push_back( node );
+		commits.push_back( std::move( pCommit ) );
+	}
+
+	// Geometry is empty until the root has content, fall back to the bottom surface's size.
+	wlr_box geometry = tree.geometry;
+	if ( ( geometry.width <= 0 || geometry.height <= 0 ) && !nodes.empty() )
+		geometry = wlr_box{ 0, 0, nodes.front().rect.w, nodes.front().rect.h };
+	if ( geometry.width <= 0 || geometry.height <= 0 )
+		return nullptr;
+
+	const gamescope::SurfaceTree::Fit_t fit = fit_surface_tree( geometry, frameInfo, cursor, flags );
+	const int nBudget = k_nMaxLayers - nReservedLayers - frameInfo->layers.count();
+	const gamescope::SurfaceTree::Result_t result = gamescope::SurfaceTree::Resolve( nodes, fit, std::max( nBudget, 1 ) );
+	if ( !result.oBaseNode )
+		return nullptr;
+
+	xdg.ulBaseStream = tree.nodes[ *result.oBaseNode ].ulSerial;
+	xdg.bPlainBase = result.bPlainBase;
+	baseCommit = commits[ *result.oBaseNode ];
+
+	FrameInfo_t::Layer_t *pBaseLayer = nullptr;
+	for ( const gamescope::SurfaceTree::Layer_t &treeLayer : result.layers )
+	{
+		const bool bBase = pBaseLayer == nullptr;
+		const gamescope::Rc<commit_t> &pCommit = commits[ treeLayer.uNode ];
+
+		// Surfaces above the base are painted like override windows.
+		const PaintWindowFlags layerFlags = bBase ? flags : ( flags | PaintWindowFlag::NoFilter ) & ~PaintWindowFlag::DrawBorders;
+		FrameInfo_t::Layer_t *pLayer = paint_window_commit( pCommit, w, w, frameInfo, cursor, layerFlags, flOpacityScale );
+		if ( !pLayer )
+			break;
+
+		// A plain base keeps paint_window_commit's transform, which can use a pre-emptively upscaled texture.
+		if ( !bBase || !result.bPlainBase )
+		{
+			pLayer->tex = pCommit->vulkanTex;
+			pLayer->colorspace = pCommit->colorspace();
+			pLayer->ctm = pLayer->colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_SCRGB ? s_scRGB709To2020Matrix : nullptr;
+			pLayer->scale = { treeLayer.scale.x, treeLayer.scale.y };
+			pLayer->offset = { treeLayer.offset.x, treeLayer.offset.y };
+			if ( treeLayer.bCropped )
+			{
+				const gamescope::SurfaceTree::Node_t &node = nodes[ treeLayer.uNode ];
+				pLayer->srcRect = { node.flSrcX, node.flSrcY, node.flSrcW, node.flSrcH };
+			}
+
+			if ( pLayer->filter == GamescopeUpscaleFilter::NEAREST && frameInfo->eUpscaleFilter == GamescopeUpscaleFilter::PIXEL )
+				pLayer->filter = GamescopeUpscaleFilter::PIXEL;
+			if ( pLayer->filter == GamescopeUpscaleFilter::PIXEL && float_is_integer( 1.0f / pLayer->scale.x ) && float_is_integer( 1.0f / pLayer->scale.y ) )
+				pLayer->filter = GamescopeUpscaleFilter::NEAREST;
+		}
+
+		if ( !bBase )
+			pLayer->zpos = g_zposOverride;
+		else
+			pBaseLayer = pLayer;
+	}
+
+	// Input lands in root surface coordinates, whichever surface the base is.
+	if ( pBaseLayer )
+	{
+		const gamescope::SurfaceTree::Vec2_t inputScale = fit.InputScale();
+		const gamescope::SurfaceTree::Vec2_t inputOffset = fit.InputOffset();
+		frameInfo->focusedWindowScale = { inputScale.x, inputScale.y };
+		frameInfo->focusedWindowOffset = { inputOffset.x, inputOffset.y };
+	}
+
+	return pBaseLayer;
+}
+
 static void
 paint_window(global_focus_t *pFocus, steamcompmgr_win_t *w, steamcompmgr_win_t *scaleW, struct FrameInfo_t *frameInfo,
-			  MouseCursor *cursor, PaintWindowFlags flags = 0, float flOpacityScale = 1.0f, steamcompmgr_win_t *fit = nullptr )
+			  MouseCursor *cursor, PaintWindowFlags flags = 0, float flOpacityScale = 1.0f, steamcompmgr_win_t *fit = nullptr,
+			  int nReservedLayers = 1 )
 {
 	gamescope::Rc<commit_t> lastCommit;
 	if ( w )
 		get_window_last_done_commit( w, lastCommit );
+
+	const bool bSurfaceTree = w && w == scaleW && w->type == steamcompmgr_win_type_t::XDG && w->xdg().pTree;
 
 	if ( flags & PaintWindowFlag::BasePlane )
 	{
@@ -2778,7 +2964,11 @@ paint_window(global_focus_t *pFocus, steamcompmgr_win_t *w, steamcompmgr_win_t *
 		}
 	}
 
-	FrameInfo_t::Layer_t *layer = paint_window_commit( lastCommit, w, scaleW, frameInfo, cursor, flags, flOpacityScale, fit );
+	FrameInfo_t::Layer_t *layer = nullptr;
+	if ( bSurfaceTree && lastCommit )
+		layer = paint_surface_tree( w, frameInfo, cursor, flags, flOpacityScale, nReservedLayers, lastCommit );
+	else
+		layer = paint_window_commit( lastCommit, w, scaleW, frameInfo, cursor, flags, flOpacityScale, fit );
 
 	if ( layer && ( flags & PaintWindowFlag::BasePlane ) )
 	{
@@ -2787,6 +2977,13 @@ paint_window(global_focus_t *pFocus, steamcompmgr_win_t *w, steamcompmgr_win_t *
 		basePlane.windowScale[1] = frameInfo->focusedWindowScale.y;
 		basePlane.windowOffset[0] = frameInfo->focusedWindowOffset.x;
 		basePlane.windowOffset[1] = frameInfo->focusedWindowOffset.y;
+		// An upscaled layer's own transform would not fit the raw texture a replay may fall back to.
+		const bool bRawTexture = layer->tex == lastCommit->vulkanTex;
+		basePlane.layerScale[0] = bRawTexture ? layer->scale.x : frameInfo->focusedWindowScale.x;
+		basePlane.layerScale[1] = bRawTexture ? layer->scale.y : frameInfo->focusedWindowScale.y;
+		basePlane.layerOffset[0] = bRawTexture ? layer->offset.x : frameInfo->focusedWindowOffset.x;
+		basePlane.layerOffset[1] = bRawTexture ? layer->offset.y : frameInfo->focusedWindowOffset.y;
+		basePlane.srcRect = layer->srcRect;
 		basePlane.opacity = layer->opacity;
 		basePlane.filter = layer->filter;
 		basePlane.eUpscaleFilter = frameInfo->eUpscaleFilter;
@@ -2977,10 +3174,11 @@ static void paint_pipewire()
 
 	// Paint the windows we have onto the Pipewire stream.
 	steamcompmgr_win_t *fit = pFocus->overrideWindow;
-	paint_window( pFocus, pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, fit );
 
 	// Leave room for the overlay painted below.
 	const int nReservedLayers = ( !ulFocusAppId && pFocus->overlayWindow && pFocus->overlayWindow->opacity ) ? 1 : 0;
+
+	paint_window( pFocus, pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, fit, nReservedLayers );
 
 	if ( !pFocus->focusWindow->isSteamStreamingClient )
 		paint_override_underlays( pFocus, pFocus->focusWindow, &frameInfo, nullptr, nReservedLayers );
@@ -3157,6 +3355,19 @@ paint_all( global_focus_t *pFocus, bool async )
 	frameInfo.eUpscaleScaler = pFocus->eUpscaleScaler;
 	frameInfo.nUpscaleSharpness = pFocus->nUpscaleSharpness;
 
+	// Leave room for the layers painted after these, so an underlay and a pile of helper windows
+	// cannot push out the Steam overlay or the cursor. The mura plane is not reserved and yields
+	// when the frame is full.
+	int nReservedLayers = 1; // cursor
+	if ( externalOverlay && externalOverlay->opacity && cv_paint_external_overlay_plane )
+		nReservedLayers++;
+	if ( cv_paint_steam_overlay_plane &&
+		 ( ( overlay && overlay->opacity ) ||
+		   ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() ) ) )
+		nReservedLayers++;
+	if ( notification && notification->opacity )
+		nReservedLayers++;
+
 	// If the window we'd paint as the base layer is the streaming client,
 	// find the video underlay and put it up first in the scenegraph
 	if ( cv_paint_primary_plane )
@@ -3206,7 +3417,7 @@ paint_all( global_focus_t *pFocus, bool async )
 						: ((currentTime - pFocus->uFadeOutStartTime) / (float)g_FadeOutDuration);
 			
 					paint_cached_base_layer(pFocus->HeldCommits[HELD_COMMIT_FADE], pFocus->CachedPlanes[HELD_COMMIT_FADE], &frameInfo, 1.0f - opacityScale, false);
-					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::FadeTarget | PaintWindowFlag::DrawBorders, opacityScale, fit);
+					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::FadeTarget | PaintWindowFlag::DrawBorders, opacityScale, fit, nReservedLayers);
 				}
 				else
 				{
@@ -3220,7 +3431,7 @@ paint_all( global_focus_t *pFocus, bool async )
 						}
 					}
 					// Just draw focused window as normal, be it Steam or the game
-					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, fit);
+					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, fit, nReservedLayers);
 
 					// The upscalers read the whole texture, so a cropped layer stays on the plain filter.
 					bool needsScaling = frameInfo.layers.get( 0 ).scale.x < 0.999f && frameInfo.layers.get( 0 ).scale.y < 0.999f &&
@@ -3255,18 +3466,6 @@ paint_all( global_focus_t *pFocus, bool async )
 	// with an offset.
 	// Josh: No override if we're streaming video
 	// as we will have too many layers. Better to be safe than sorry.
-	// Leave room for the layers painted after these, so an underlay and a pile of helper windows
-	// cannot push out the Steam overlay or the cursor. The mura plane is not reserved and yields
-	// when the frame is full.
-	int nReservedLayers = 1; // cursor
-	if ( externalOverlay && externalOverlay->opacity && cv_paint_external_overlay_plane )
-		nReservedLayers++;
-	if ( cv_paint_steam_overlay_plane &&
-		 ( ( overlay && overlay->opacity ) ||
-		   ( !GetBackend()->UsesVulkanSwapchain() && GetBackend()->IsSessionBased() ) ) )
-		nReservedLayers++;
-	if ( notification && notification->opacity )
-		nReservedLayers++;
 
 	if ( w && !w->isSteamStreamingClient && cv_paint_override_redirect_plane )
 		paint_override_underlays( pFocus, w, &frameInfo, pFocus->cursor, nReservedLayers );
@@ -6795,7 +6994,11 @@ steamcompmgr_flush_frame_done( steamcompmgr_win_t *w )
 		// Acknowledge commit once.
 		wlserver_lock();
 
-		if ( main_surface != nullptr )
+		if ( main_surface != nullptr && w->type == steamcompmgr_win_type_t::XDG )
+		{
+			wlserver_send_frame_done_tree(main_surface, &now);
+		}
+		else if ( main_surface != nullptr )
 		{
 			wlserver_send_frame_done(main_surface, &now);
 		}
@@ -8025,7 +8228,7 @@ static gamescope::CommitQueue::SelectionResult handle_done_commit( steamcompmgr_
 		// If this is the main plane, repaint
 		if ( w == pFocus->focusWindow && !w->isSteamStreamingClient )
 		{
-			if ( !cv_paint_debug_pause_base_plane )
+			if ( !cv_paint_debug_pause_base_plane && commit_is_base_stream( w, **selected ) )
 				pFocus->HeldCommits[ HELD_COMMIT_BASE ] = (*selected);
 			hasRepaint = true;
 
@@ -8189,6 +8392,10 @@ void handle_presented_for_window( steamcompmgr_win_t* w )
 	bool vrr = GetBackend()->GetCurrentConnector() && GetBackend()->GetCurrentConnector()->IsVRRActive();
 	uint64_t refresh_interval = vrr ? UINT64_MAX : g_SteamCompMgrAppRefreshCycle;
 
+	// One sequence per presented frame, however many surfaces it carried.
+	uint64_t ulSequence = 0;
+	auto presentationSequence = [ & ]() { return ulSequence ? ulSequence : ( ulSequence = ++w->presentation_sequence ); };
+
 	commit_t *lastCommit = get_window_last_done_commit_peek(w);
 	if (lastCommit)
 	{
@@ -8212,8 +8419,30 @@ void handle_presented_for_window( steamcompmgr_win_t* w )
 		if ( !lastCommit->presentation_feedbacks.empty() )
 		{
 			wlserver_presentation_feedback_presented( lastCommit->presentation_feedbacks,
-				next_refresh_time, refresh_cycle, ++w->presentation_sequence );
+				next_refresh_time, refresh_cycle, presentationSequence() );
 		}
+	}
+
+	if ( w->type == steamcompmgr_win_type_t::XDG )
+	{
+		// Every surface of the tree is presented with the frame, each reports its own commit.
+		for ( const auto &pCommit : w->commit_queue )
+		{
+			if ( !pCommit->done || pCommit.get() == lastCommit )
+				continue;
+
+			wlserver_present_timing_report( pCommit->present_timing, pCommit->present_time, pCommit->latch_time,
+				pCommit->predicted_present_time, pCommit->earliest_present_time, pCommit->earliest_latch_time );
+			if ( !pCommit->presentation_feedbacks.empty() )
+			{
+				wlserver_presentation_feedback_presented( pCommit->presentation_feedbacks,
+					next_refresh_time, refresh_cycle, presentationSequence() );
+			}
+		}
+
+		if ( struct wlr_surface *root = w->main_surface() )
+			wlserver_refresh_cycle_tree( root, refresh_cycle, refresh_interval );
+		return;
 	}
 
 	if (struct wlr_surface *surface = w->current_surface())
@@ -8499,10 +8728,23 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 	}
 
 	bool already_exists = false;
-	for ( const auto& existing_commit : w->commit_queue )
+	if ( w->type == steamcompmgr_win_type_t::XDG )
 	{
-		if (existing_commit->buf == buf)
-			already_exists = true;
+		// A viewport or size change can reuse the buffer, so only a repeat of the stream's newest commit is one.
+		const uint64_t ulStream = reslistentry.ulSurfaceSerial;
+		auto newest = std::find_if( w->commit_queue.rbegin(), w->commit_queue.rend(), [ ulStream ]( const gamescope::Rc<commit_t> &pCommit )
+		{
+			return pCommit->stream == ulStream;
+		} );
+		already_exists = newest != w->commit_queue.rend() && (*newest)->buf == buf && (*newest)->surfaceState == reslistentry.surfaceState;
+	}
+	else
+	{
+		for ( const auto& existing_commit : w->commit_queue )
+		{
+			if (existing_commit->buf == buf)
+				already_exists = true;
+		}
 	}
 
 	if ( already_exists && !reslistentry.feedback && reslistentry.presentation_feedbacks.empty() && !reslistentry.present_timing.serial )
@@ -8537,6 +8779,8 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 	}
 
 	newCommit->stream = w->type == steamcompmgr_win_type_t::XDG ? reslistentry.ulSurfaceSerial : 0;
+	newCommit->surfaceState = reslistentry.surfaceState;
+	const bool bBaseStream = commit_is_base_stream( w, *newCommit );
 	newCommit->bOverrideContent = reslistentry.surf == w->override_surface();
 	newCommit->pAcquirePoint = reslistentry.pAcquirePoint;
 	if ( newCommit->bOverrideContent )
@@ -8554,7 +8798,7 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 
 	// Only send the legacy stream while an untagged mangoapp is there to drain it.
 	const bool bHasLegacyReader = !GetBackend()->UsesVirtualConnectors() || has_legacy_mangoapp_reader();
-	const bool mango_nudge = pCurrentFocus && ( ( w == pCurrentFocus->focusWindow && !w->isSteamStreamingClient ) ||
+	const bool mango_nudge = bBaseStream && pCurrentFocus && ( ( w == pCurrentFocus->focusWindow && !w->isSteamStreamingClient ) ||
 								( pCurrentFocus->focusWindow && pCurrentFocus->focusWindow->isSteamStreamingClient && w->isSteamStreamingClientVideo ) )
 								&& !bMangoappSocketDisable && bHasLegacyReader;
 
@@ -8564,7 +8808,7 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 	// Typed stream of the window's own connector, only while a tagged
 	// mangoapp is there to drain it.
 	uint32_t uMangoMsgType = 0;
-	if ( !bMangoappSocketDisable )
+	if ( !bMangoappSocketDisable && bBaseStream )
 	{
 		global_focus_t *pMangoFocus = nullptr;
 		if ( pUpscaleFocus && !w->isSteamStreamingClient )
@@ -8585,7 +8829,9 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 			uMangoMsgType = pMangoFocus->externalOverlayWindow->uMangoappMsgType;
 	}
 
-	bool bValidPreemptiveScale = newCommit->pAcquirePoint && pUpscaleFocus && cv_upscale_preemptive;
+	// A baked upscale is only right for a native window whose base maps like a plain one.
+	const bool bPlainBase = w->type != steamcompmgr_win_type_t::XDG || !w->xdg().pTree || w->xdg().bPlainBase;
+	bool bValidPreemptiveScale = newCommit->pAcquirePoint && pUpscaleFocus && cv_upscale_preemptive && bBaseStream && bPlainBase;
 	bool bPreemptiveUpscale = bValidPreemptiveScale && newCommit->ShouldPreemptivelyUpscale( pUpscaleFocus->eUpscaleFilter, pUpscaleFocus->eUpscaleScaler );
 
 	bool bKnownReady = false;
@@ -9478,6 +9724,23 @@ void steamcompmgr_check_xdg(bool vblank, uint64_t vblank_idx)
 #endif
 		g_steamcompmgr_xdg_wins = wlserver_get_xdg_shell_windows();
 		MakeFocusDirty();
+	}
+
+	for ( const auto &xdg_win : g_steamcompmgr_xdg_wins )
+	{
+		steamcompmgr_xdg_win_t &xdg = xdg_win->xdg();
+		if ( !xdg.surface.bTreeDirty.exchange( false ) )
+			continue;
+
+		{
+			std::lock_guard lock( xdg.surface.treeLock );
+			xdg.pTree = xdg.surface.pTree;
+		}
+
+		if ( xdg.pTree )
+			xdg.geometry = xdg.pTree->geometry;
+		xdg.ulTreeSerial++;
+		hasRepaint = true;
 	}
 
 	handle_done_commits_xdg( vblank, vblank_idx );
