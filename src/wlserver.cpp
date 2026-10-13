@@ -47,6 +47,7 @@
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_viewporter.h>
+#include <wlr/types/wlr_subcompositor.h>
 #include <wlr/util/region.h>
 #include "wlr_end.hpp"
 
@@ -2603,6 +2604,12 @@ bool wlserver_init( void ) {
 	if ( !wlr_viewporter_create( wlserver.display ) )
 	{
 		wl_log.errorf( "Unable to create viewporter interface" );
+		return false;
+	}
+
+	if ( !wlr_subcompositor_create( wlserver.display ) )
+	{
+		wl_log.errorf( "Unable to create subcompositor interface" );
 		return false;
 	}
 
