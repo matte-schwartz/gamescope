@@ -4,9 +4,11 @@ vec4 textureCond(sampler2D layerSampler, uint layerIdx, vec2 pos, bool unnormali
     vec2 coord = pos;
 #ifndef BLUR_DONT_SCALE
     coord = ((coord + u_offset[layerIdx]) * u_scale[layerIdx]);
+    vec2 clipMin = max(u_clip[layerIdx].xy, vec2(0.0f));
+    vec2 clipMax = min(u_clip[layerIdx].zw, texSize);
 
-    if (coord.x < 0.0f       || coord.y < 0.0f ||
-        coord.x >= texSize.x || coord.y >= texSize.y) {
+    if (coord.x < clipMin.x  || coord.y < clipMin.y ||
+        coord.x >= clipMax.x || coord.y >= clipMax.y) {
         float border = (u_borderMask & (1u << layerIdx)) != 0 ? 1.0f : 0.0f;
         return vec4(0.0f, 0.0f, 0.0f, border);
     }

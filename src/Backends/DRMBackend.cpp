@@ -2024,7 +2024,7 @@ struct LiftoffStateCacheEntry
 	{
 		bool ycbcr;
 		uint32_t zpos;
-		uint32_t srcW, srcH;
+		uint32_t srcX, srcY, srcW, srcH;
 		uint32_t crtcX, crtcY, crtcW, crtcH;
 		uint16_t opacity;
 		drm_color_encoding colorEncoding;
@@ -2049,6 +2049,8 @@ struct LiftoffStateCacheEntryKasher
 		{
 			hash_combine(hash, k.layerState[i].ycbcr);
 			hash_combine(hash, k.layerState[i].zpos);
+			hash_combine(hash, k.layerState[i].srcX);
+			hash_combine(hash, k.layerState[i].srcY);
 			hash_combine(hash, k.layerState[i].srcW);
 			hash_combine(hash, k.layerState[i].srcH);
 			hash_combine(hash, k.layerState[i].crtcX);
@@ -2166,17 +2168,16 @@ LiftoffStateCacheEntry FrameInfoToLiftoffStateCacheEntry( struct drm_t *drm, con
 	entry.nLayerCount = frameInfo->layers.count();
 	for ( int i = 0; i < entry.nLayerCount; i++ )
 	{
-		const uint16_t srcWidth  = frameInfo->layers.get( i ).tex->width();
-		const uint16_t srcHeight = frameInfo->layers.get( i ).tex->height();
-
-		int32_t crtcX = -frameInfo->layers.get( i ).offset.x;
-		int32_t crtcY = -frameInfo->layers.get( i ).offset.y;
-		uint64_t crtcW = srcWidth / frameInfo->layers.get( i ).scale.x;
-		uint64_t crtcH = srcHeight / frameInfo->layers.get( i ).scale.y;
+		const FrameInfo_t::Layer_t &layer = frameInfo->layers.get( i );
+		const FrameInfo_t::Layer_t::SrcRect_t src = layer.effectiveSrcRect();
+		int32_t crtcX = -layer.offset.x + src.x / layer.scale.x;
+		int32_t crtcY = -layer.offset.y + src.y / layer.scale.y;
+		uint64_t crtcW = src.w / layer.scale.x;
+		uint64_t crtcH = src.h / layer.scale.y;
 
 		if (g_bRotated && g_uOutputRotation == 0)
 		{
-			int64_t imageH = frameInfo->layers.get( i ).tex->contentHeight() / frameInfo->layers.get( i ).scale.y;
+			int64_t imageH = ( layer.hasSrcRect() ? src.h : layer.tex->contentHeight() ) / layer.scale.y;
 
 			const int32_t x = crtcX;
 			const uint64_t w = crtcW;
@@ -2187,8 +2188,11 @@ LiftoffStateCacheEntry FrameInfoToLiftoffStateCacheEntry( struct drm_t *drm, con
 		}
 
 		entry.layerState[i].zpos  = frameInfo->layers.get( i ).zpos;
-		entry.layerState[i].srcW  = srcWidth  << 16;
-		entry.layerState[i].srcH  = srcHeight << 16;
+		// 16.16 fixed point, viewport sources can be fractional.
+		entry.layerState[i].srcX  = uint32_t( src.x * 65536.0f );
+		entry.layerState[i].srcY  = uint32_t( src.y * 65536.0f );
+		entry.layerState[i].srcW  = uint32_t( src.w * 65536.0f );
+		entry.layerState[i].srcH  = uint32_t( src.h * 65536.0f );
 		entry.layerState[i].crtcX = crtcX;
 		entry.layerState[i].crtcY = crtcY;
 		entry.layerState[i].crtcW = crtcW;
@@ -2917,8 +2921,8 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 				liftoff_layer_unset_property( drm->lo_layers[ i ], "pixel blend mode" );
 			}
 
-			liftoff_layer_set_property( drm->lo_layers[ i ], "SRC_X", 0);
-			liftoff_layer_set_property( drm->lo_layers[ i ], "SRC_Y", 0);
+			liftoff_layer_set_property( drm->lo_layers[ i ], "SRC_X", entry.layerState[i].srcX );
+			liftoff_layer_set_property( drm->lo_layers[ i ], "SRC_Y", entry.layerState[i].srcY );
 			liftoff_layer_set_property( drm->lo_layers[ i ], "SRC_W", entry.layerState[i].srcW );
 			liftoff_layer_set_property( drm->lo_layers[ i ], "SRC_H", entry.layerState[i].srcH );
 

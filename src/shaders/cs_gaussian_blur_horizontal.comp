@@ -28,6 +28,10 @@ uniform layers_t {
     float u_nitsToLinear;
     float u_itmSdrNits;
     float u_itmTargetNits;
+
+    uint u_rotation;
+
+    vec4 u_clip[VKR_MAX_LAYERS];
 };
 
 #include "composite.h"

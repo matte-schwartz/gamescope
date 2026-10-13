@@ -11,6 +11,7 @@
 #include <bitset>
 #include <mutex>
 #include <optional>
+#include <limits>
 #include <span>
 #include <thread>
 
@@ -330,6 +331,29 @@ struct FrameInfo_t
 		std::shared_ptr<gamescope::BackendBlob> hdr_metadata_blob;
 
 		GamescopeAppTextureColorspace colorspace;
+
+		// Texture-space source rect, the whole texture when empty.
+		struct SrcRect_t
+		{
+			float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+		} srcRect;
+
+		bool hasSrcRect() const { return srcRect.w > 0.0f && srcRect.h > 0.0f; }
+
+		SrcRect_t effectiveSrcRect() const
+		{
+			if ( hasSrcRect() )
+				return srcRect;
+			return SrcRect_t{ 0.0f, 0.0f, float( tex->width() ), float( tex->height() ) };
+		}
+
+		// The shader clamps this to the texture, so an unset rect samples all of it.
+		std::array<float, 4> clipRect() const
+		{
+			if ( !hasSrcRect() )
+				return { 0.0f, 0.0f, std::numeric_limits<float>::max(), std::numeric_limits<float>::max() };
+			return { srcRect.x, srcRect.y, srcRect.x + srcRect.w, srcRect.y + srcRect.h };
+		}
 
 		bool isYcbcr() const
 		{

@@ -32,6 +32,7 @@ uniform layers_t {
     mat3x4 u_outputCTM;
     uint u_borderMask;
     uvec2 u_halfExtent;
+    vec4 u_clip[1];
 };
 
 #include "composite.h"

@@ -166,9 +166,11 @@ vec4 sampleBilinear(sampler2D tex, vec2 coord, uint colorspace, bool unnormalize
 vec4 sampleLayerEx(sampler2D layerSampler, uint offsetLayerIdx, uint colorspaceLayerIdx, vec2 uv, bool unnormalized) {
     vec2 coord = ((uv + u_offset[offsetLayerIdx]) * u_scale[offsetLayerIdx]);
     vec2 texSize = textureSize(layerSampler, 0);
+    vec2 clipMin = max(u_clip[offsetLayerIdx].xy, vec2(0.0f));
+    vec2 clipMax = min(u_clip[offsetLayerIdx].zw, texSize);
 
-    if (coord.x < 0.0f       || coord.y < 0.0f ||
-        coord.x >= texSize.x || coord.y >= texSize.y) {
+    if (coord.x < clipMin.x  || coord.y < clipMin.y ||
+        coord.x >= clipMax.x || coord.y >= clipMax.y) {
         float border = (u_borderMask & (1u << offsetLayerIdx)) != 0 ? 1.0f : 0.0f;
 
         if (checkDebugFlag(compositedebug_PlaneBorders))

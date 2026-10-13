@@ -3877,6 +3877,8 @@ struct BlitPushData_t
 
 	uint32_t u_rotation;
 
+	std::array<float, 4> clip[k_nMaxLayers];
+
 	explicit BlitPushData_t(const struct FrameInfo_t *frameInfo, uint32_t rotation = 0)
 	{
 		u_shaderFilter = 0;
@@ -3888,6 +3890,7 @@ struct BlitPushData_t
 			scale[i] = layer->scale;
 			offset[i] = layer->offsetPixelCenter();
 			opacity[i] = layer->opacity;
+			clip[i] = layer->clipRect();
             // SGSR only exists as a pre-pass, a layer still carrying it samples as linear.
             GamescopeUpscaleFilter eFilter = layer->filter == GamescopeUpscaleFilter::SGSR ? GamescopeUpscaleFilter::LINEAR : layer->filter;
             if (layer->isScreenSize() || (eFilter == GamescopeUpscaleFilter::LINEAR && layer->viewConvertsToLinearAutomatically()))
@@ -3926,6 +3929,7 @@ struct BlitPushData_t
 		scale[0] = { blit_scale, blit_scale };
 		offset[0] = { 0.5f, 0.5f };
 		opacity[0] = 1.0f;
+		clip[0] = FrameInfo_t::Layer_t{}.clipRect();
         u_shaderFilter = (uint32_t)GamescopeUpscaleFilter::LINEAR;
 		u_alphaMode = 0;
 		u_rotation = 0;
@@ -3954,11 +3958,13 @@ struct CaptureConvertBlitData_t
 	mat3x4 outputCTM;
 	uint32_t borderMask;
 	uint32_t halfExtent[2];
+	std::array<float, 4> clip[1];
 
 	explicit CaptureConvertBlitData_t(float blit_scale, const mat3x4 &color_matrix) {
 		scale[0] = { blit_scale, blit_scale };
 		offset[0] = { 0.0f, 0.0f };
 		opacity[0] = 1.0f;
+		clip[0] = FrameInfo_t::Layer_t{}.clipRect();
 		borderMask = 0;
 		ctm[0] = glm::mat3x4
 		{
@@ -4028,6 +4034,8 @@ struct RcasPushData_t
 
 	uint32_t u_rotation;
 
+	std::array<float, 4> u_clip[k_nMaxLayers - 1];
+
 	RcasPushData_t(const struct FrameInfo_t *frameInfo, float sharpness, uint32_t rotation = 0)
 	{
 		uvec4_t tmp;
@@ -4079,6 +4087,7 @@ struct RcasPushData_t
 		{
 			u_scale[i - 1] = frameInfo->layers.get( i ).scale;
 			u_offset[i - 1] = frameInfo->layers.get( i ).offsetPixelCenter();
+			u_clip[i - 1] = frameInfo->layers.get( i ).clipRect();
 		}
 	}
 };

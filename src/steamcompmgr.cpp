@@ -3222,7 +3222,9 @@ paint_all( global_focus_t *pFocus, bool async )
 					// Just draw focused window as normal, be it Steam or the game
 					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, fit);
 
-					bool needsScaling = frameInfo.layers.get( 0 ).scale.x < 0.999f && frameInfo.layers.get( 0 ).scale.y < 0.999f;
+					// The upscalers read the whole texture, so a cropped layer stays on the plain filter.
+					bool needsScaling = frameInfo.layers.get( 0 ).scale.x < 0.999f && frameInfo.layers.get( 0 ).scale.y < 0.999f &&
+						!frameInfo.layers.get( 0 ).hasSrcRect();
 					GamescopeUpscaleFilter eLayer0Filter = ResolveUpscaleFilter( frameInfo.eUpscaleFilter, frameInfo.layers.get( 0 ).colorspace, frameInfo.layers.get( 0 ).isYcbcr() );
 					frameInfo.useFSRLayer0 = eLayer0Filter == GamescopeUpscaleFilter::FSR && needsScaling;
 					frameInfo.useNISLayer0 = eLayer0Filter == GamescopeUpscaleFilter::NIS && needsScaling;

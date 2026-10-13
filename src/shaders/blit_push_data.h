@@ -18,5 +18,8 @@ uniform layers_t {
     float u_itmTargetNits;
 
     uint u_rotation;
+
+    // Texture-space source rect per layer, clamped to the texture.
+    vec4 u_clip[VKR_MAX_LAYERS];
 };
 

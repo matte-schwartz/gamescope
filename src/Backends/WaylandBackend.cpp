@@ -1699,18 +1699,19 @@ namespace gamescope
         {
             pWaylandFb->OnCompositorAcquire();
 
+            const FrameInfo_t::Layer_t::SrcRect_t src = pLayer->effectiveSrcRect();
             Present(
                 ClipPlane( WaylandPlaneState
                 {
                     .pBuffer     = pBuffer,
-                    .nDestX      = int32_t( -pLayer->offset.x ),
-                    .nDestY      = int32_t( -pLayer->offset.y ),
-                    .flSrcX      = 0.0,
-                    .flSrcY      = 0.0,
-                    .flSrcWidth  = double( pLayer->tex->width() ),
-                    .flSrcHeight = double( pLayer->tex->height() ),
-                    .nDstWidth   = int32_t( ceil( pLayer->tex->width() / double( pLayer->scale.x ) ) ),
-                    .nDstHeight  = int32_t( ceil( pLayer->tex->height() / double( pLayer->scale.y ) ) ),
+                    .nDestX      = int32_t( -pLayer->offset.x + src.x / pLayer->scale.x ),
+                    .nDestY      = int32_t( -pLayer->offset.y + src.y / pLayer->scale.y ),
+                    .flSrcX      = double( src.x ),
+                    .flSrcY      = double( src.y ),
+                    .flSrcWidth  = double( src.w ),
+                    .flSrcHeight = double( src.h ),
+                    .nDstWidth   = int32_t( ceil( src.w / double( pLayer->scale.x ) ) ),
+                    .nDstHeight  = int32_t( ceil( src.h / double( pLayer->scale.y ) ) ),
                     .eColorspace = pLayer->colorspace,
                     .pHDRMetadata = pLayer->hdr_metadata_blob,
                     .bOpaque     = pLayer->zpos == g_zposBase,
