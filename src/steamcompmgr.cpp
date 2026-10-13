@@ -4171,10 +4171,12 @@ is_focus_priority_greater( steamcompmgr_win_t *a, steamcompmgr_win_t *b )
 		a->is_dialog != b->is_dialog )
 		return !a->is_dialog;
 
-	if (a->type != steamcompmgr_win_type_t::XWAYLAND)
-	{
-		return true;
-	}
+	if ( a->type != b->type )
+		return a->type != steamcompmgr_win_type_t::XWAYLAND;
+
+	// Keep this a strict weak ordering for native windows, newest first.
+	if ( a->type != steamcompmgr_win_type_t::XWAYLAND )
+		return a->seq > b->seq;
 
 	// Attempt to tie-break dropdowns by transient-for.
 	if ( win_maybe_a_dropdown( a ) && win_maybe_a_dropdown( b ) &&
@@ -4984,6 +4986,9 @@ steamcompmgr_xdg_get_possible_focus_windows()
 		{
 			continue;
 		}
+
+		if ( !win->xdg().surface.mapped )
+			continue;
 
 		windows.emplace_back( win.get() );
 	}
