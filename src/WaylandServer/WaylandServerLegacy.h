@@ -63,6 +63,8 @@ struct wlserver_wl_surface_info
 	gamescope::WaylandServer::CLinuxDrmSyncobjSurface *pSyncobjSurface = nullptr;
 
 	struct wlr_surface *wlr = nullptr;
+	// Never reused, unlike the wlr_surface address.
+	uint64_t ulSerial = 0;
 	struct wl_listener commit;
 	struct wl_listener destroy;
 

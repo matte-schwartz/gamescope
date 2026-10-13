@@ -51,6 +51,7 @@ struct ResListEntry_t {
 	std::shared_ptr<gamescope::CReleaseTimelinePoint> pReleasePoint;
 	pixman_box32_t damageExtents;
 	std::vector<pixman_box32_t> damage;
+	uint64_t ulSurfaceSerial = 0;
 };
 
 struct wlserver_content_override;

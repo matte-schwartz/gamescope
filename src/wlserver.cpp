@@ -177,6 +177,7 @@ ResListEntry_t PrepareCommit( struct wlr_surface *surf, struct wlr_buffer *buf )
 		std::move( pReleasePoint ),
 	};
 	newEntry.damageExtents = *pixman_region32_extents( &surf->buffer_damage );
+	newEntry.ulSurfaceSerial = wl_surf->ulSerial;
 	if ( wl_surf->x11_surface && wl_surf->x11_surface->override_surface && wl_surf->x11_surface->override_surface != surf )
 	{
 		int nDamageRects = 0;
@@ -734,8 +735,11 @@ static void wlserver_new_surface(struct wl_listener *l, void *data)
 	struct wlr_surface *wlr_surf = (struct wlr_surface *)data;
 	uint32_t id = wl_resource_get_id(wlr_surf->resource);
 
+	static uint64_t s_ulSurfaceSerial = 0;
+
 	wlserver_wl_surface_info *wl_surface_info = new wlserver_wl_surface_info;
 	wl_surface_info->wlr = wlr_surf;
+	wl_surface_info->ulSerial = ++s_ulSurfaceSerial;
 
 	wl_surface_info->destroy.notify = handle_wl_surface_destroy;
 	wl_signal_add( &wlr_surf->events.destroy, &wl_surface_info->destroy );

@@ -50,6 +50,7 @@
 #include <string>
 #include <filesystem>
 #include <unordered_map>
+#include <set>
 #include <unordered_set>
 
 #include <assert.h>
@@ -8051,7 +8052,7 @@ static gamescope::CommitQueue::SelectionResult handle_done_commit( steamcompmgr_
 		w->outdatedInteractiveFocus = false;
 	}
 
-	w->commit_queue.erase( w->commit_queue.begin(), selected );
+	gamescope::CommitQueue::EraseSuperseded( w->commit_queue, selected );
 	w->receivedDoneCommit = true;
 	return gamescope::CommitQueue::SelectionResult::Ready;
 }
@@ -8066,10 +8067,9 @@ void handle_done_commits_xwayland( xwayland_ctx_t *ctx, bool vblank, uint64_t vb
 	commits_before_their_time.clear();
 	commits_before_their_time.reserve( 32 );
 
-	// windows in FIFO mode we got a new frame to present for this vblank
-	static std::unordered_set< uint64_t > fifo_win_seqs;
-	fifo_win_seqs.clear();
-	fifo_win_seqs.reserve( 32 );
+	// window streams in FIFO mode we got a new frame to present for this vblank
+	static std::set< std::pair< uint64_t, uint64_t > > fifo_streams;
+	fifo_streams.clear();
 
 	uint64_t now = get_time_in_nanos();
 
@@ -8092,7 +8092,7 @@ void handle_done_commits_xwayland( xwayland_ctx_t *ctx, bool vblank, uint64_t vb
 		// Only pace windows the FPS limiter covers.
 		const bool entry_vblank = vblank && steamcompmgr_should_vblank_window( entry_win, vblank_idx, now );
 
-		if (entry.fifo && (!entry_vblank || fifo_win_seqs.count(entry.winSeq) > 0))
+		if (entry.fifo && (!entry_vblank || fifo_streams.contains( { entry.winSeq, entry.stream } )))
 		{
 			commits_before_their_time.push_back( entry );
 			continue;
@@ -8102,7 +8102,7 @@ void handle_done_commits_xwayland( xwayland_ctx_t *ctx, bool vblank, uint64_t vb
 		if ( result == gamescope::CommitQueue::SelectionResult::Blocked )
 			commits_before_their_time.push_back( entry );
 		else if ( result == gamescope::CommitQueue::SelectionResult::Ready && entry.fifo )
-			fifo_win_seqs.insert(entry.winSeq);
+			fifo_streams.insert( { entry.winSeq, entry.stream } );
 	}
 
 	ctx->doneCommits->listCommitsDone.swap( commits_before_their_time );
@@ -8117,10 +8117,9 @@ void handle_done_commits_xdg( bool vblank, uint64_t vblank_idx )
 	commits_before_their_time.clear();
 	commits_before_their_time.reserve( 32 );
 
-	// windows in FIFO mode we got a new frame to present for this vblank
-	static std::unordered_set< uint64_t > fifo_win_seqs;
-	fifo_win_seqs.clear();
-	fifo_win_seqs.reserve( 32 );
+	// window streams in FIFO mode we got a new frame to present for this vblank
+	static std::set< std::pair< uint64_t, uint64_t > > fifo_streams;
+	fifo_streams.clear();
 
 	uint64_t now = get_time_in_nanos();
 
@@ -8143,7 +8142,7 @@ void handle_done_commits_xdg( bool vblank, uint64_t vblank_idx )
 		// Only pace windows the FPS limiter covers.
 		const bool entry_vblank = vblank && steamcompmgr_should_vblank_window( entry_win, vblank_idx, now );
 
-		if (entry.fifo && (!entry_vblank || fifo_win_seqs.count(entry.winSeq) > 0))
+		if (entry.fifo && (!entry_vblank || fifo_streams.contains( { entry.winSeq, entry.stream } )))
 		{
 			commits_before_their_time.push_back( entry );
 			continue;
@@ -8153,7 +8152,7 @@ void handle_done_commits_xdg( bool vblank, uint64_t vblank_idx )
 		if ( result == gamescope::CommitQueue::SelectionResult::Blocked )
 			commits_before_their_time.push_back( entry );
 		else if ( result == gamescope::CommitQueue::SelectionResult::Ready && entry.fifo )
-			fifo_win_seqs.insert(entry.winSeq);
+			fifo_streams.insert( { entry.winSeq, entry.stream } );
 	}
 
 	g_steamcompmgr_xdg_done_commits->listCommitsDone.swap( commits_before_their_time );
@@ -8535,6 +8534,7 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 		return;
 	}
 
+	newCommit->stream = w->type == steamcompmgr_win_type_t::XDG ? reslistentry.ulSurfaceSerial : 0;
 	newCommit->bOverrideContent = reslistentry.surf == w->override_surface();
 	newCommit->pAcquirePoint = reslistentry.pAcquirePoint;
 	if ( newCommit->bOverrideContent )

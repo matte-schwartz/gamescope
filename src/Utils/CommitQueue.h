@@ -33,4 +33,16 @@ namespace gamescope::CommitQueue
 		} );
 		return std::pair{ blocked ? SelectionResult::Blocked : SelectionResult::Ready, selected };
 	}
+
+	// Stream 0 is the whole window, so it supersedes every older commit.
+	template <typename Queue>
+	void EraseSuperseded( Queue &queue, typename Queue::iterator selected )
+	{
+		const uint64_t ulStream = (*selected)->stream;
+		const auto newEnd = std::remove_if( queue.begin(), selected, [ulStream]( const auto &commit )
+		{
+			return !ulStream || commit->stream == ulStream;
+		} );
+		queue.erase( newEnd, selected );
+	}
 }

@@ -6,6 +6,7 @@
 
 namespace
 {
+	using gamescope::CommitQueue::EraseSuperseded;
 	using gamescope::CommitQueue::Select;
 	using gamescope::CommitQueue::SelectionResult;
 	struct Commit
@@ -19,6 +20,7 @@ namespace
 		{
 			uint32_t flags = 0;
 		} present_timing;
+		uint64_t stream = 0;
 	};
 	using Queue = std::vector<std::shared_ptr<Commit>>;
 	auto MakeCommit( uint64_t id, uintptr_t surf = 1, bool fifo = true, bool done = false )
@@ -103,4 +105,42 @@ TEST_CASE("Relative ordering stays within the submitting surface", "[commit_queu
 TEST_CASE("Untimed mailbox frames still supersede unfinished predecessors", "[commit_queue]") {
 	Queue queue{ MakeRelative(1), MakeCommit(2, 1, false) };
 	REQUIRE(Select(queue, 2).first == SelectionResult::Ready);
+}
+
+namespace
+{
+	auto MakeStreamCommit( uint64_t id, uint64_t stream )
+	{
+		auto commit = MakeCommit( id, stream, false );
+		commit->stream = stream;
+		return commit;
+	}
+
+	std::vector<uint64_t> CommitIDs( const Queue &queue )
+	{
+		std::vector<uint64_t> ids;
+		for ( const auto &commit : queue )
+			ids.push_back( commit->commitID );
+		return ids;
+	}
+}
+
+TEST_CASE("Whole-window commits supersede every older commit", "[commit_queue]") {
+	Queue queue{ MakeStreamCommit(1, 0), MakeStreamCommit(2, 0), MakeStreamCommit(3, 0), MakeStreamCommit(4, 0) };
+	EraseSuperseded(queue, queue.begin() + 2);
+	REQUIRE(CommitIDs(queue) == std::vector<uint64_t>{ 3, 4 });
+}
+
+TEST_CASE("Stream commits only supersede their own stream", "[commit_queue]") {
+	Queue queue{ MakeStreamCommit(1, 7), MakeStreamCommit(2, 9), MakeStreamCommit(3, 7), MakeStreamCommit(4, 9) };
+	EraseSuperseded(queue, queue.begin() + 2);
+	REQUIRE(CommitIDs(queue) == std::vector<uint64_t>{ 2, 3, 4 });
+	EraseSuperseded(queue, queue.begin() + 2);
+	REQUIRE(CommitIDs(queue) == std::vector<uint64_t>{ 3, 4 });
+}
+
+TEST_CASE("Superseding the first commit erases nothing", "[commit_queue]") {
+	Queue queue{ MakeStreamCommit(1, 7), MakeStreamCommit(2, 7) };
+	EraseSuperseded(queue, queue.begin());
+	REQUIRE(CommitIDs(queue) == std::vector<uint64_t>{ 1, 2 });
 }

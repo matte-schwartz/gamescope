@@ -77,6 +77,7 @@ void commit_t::Signal()
         std::unique_lock< std::mutex > lock( m_pDoneCommits->listCommitsDoneLock );
         m_pDoneCommits->listCommitsDone.push_back( CommitDoneEntry_t{
             .winSeq = win_seq,
+            .stream = stream,
             .commitID = commitID,
             .desiredPresentTime = present_timing.target,
             .timingFlags = present_timing.flags,

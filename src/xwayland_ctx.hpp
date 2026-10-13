@@ -51,6 +51,7 @@ struct focus_t
 struct CommitDoneEntry_t
 {
 	uint64_t winSeq;
+	uint64_t stream;
 	uint64_t commitID;
 	uint64_t desiredPresentTime;
 	uint32_t timingFlags;
