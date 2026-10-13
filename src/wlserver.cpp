@@ -221,6 +221,20 @@ void wlserver_xdg_commit( ResListEntry_t entry )
 	nudge_steamcompmgr();
 }
 
+static void discard_pending_commits( struct wlr_surface *surface )
+{
+	std::erase_if( g_PendingCommits, [ surface ]( ResListEntry_t &pending )
+	{
+		if ( pending.surf != surface )
+			return false;
+
+		wlserver_present_timing_discard( pending.present_timing );
+		wlserver_presentation_feedback_discard( pending.presentation_feedbacks );
+		wlr_buffer_unlock( pending.buf );
+		return true;
+	} );
+}
+
 void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 	wlr_surface->current.committed = 0;
 
@@ -266,6 +280,8 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 	}
 	else
 	{
+		// Only the newest content matters once a role arrives, and each entry pins a client buffer.
+		discard_pending_commits( wlr_surface );
 		g_PendingCommits.emplace_back( std::move( entry ) );
 	}
 }
