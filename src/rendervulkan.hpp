@@ -1016,6 +1016,7 @@ public:
 	void copyImage(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst);
 	void copyImageRegions(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst, std::span<const VkImageCopy> regions);
 	void copyBufferToImage(VkBuffer buffer, VkDeviceSize offset, uint32_t stride, gamescope::Rc<CVulkanTexture> dst);
+	void clearImage(gamescope::Rc<CVulkanTexture> dst, const VkClearColorValue &color);
 
 
 	void prepareSrcImage(CVulkanTexture *image);
