@@ -968,7 +968,16 @@ Window x11_win(steamcompmgr_win_t *w) {
 }
 
 static std::atomic<uint64_t> s_ulFocusSerial = 0ul;
+// Geometry, stacking and mapping changes repaint even when the pick stays the same.
+static std::atomic<bool> s_bFocusDirtyRepaint = false;
 void MakeFocusDirty()
+{
+	s_ulFocusSerial++;
+	s_bFocusDirtyRepaint = true;
+}
+
+// Damage only re-checks the pick, it does not force a repaint.
+static void MakeFocusPickDirty()
 {
 	s_ulFocusSerial++;
 }
@@ -5263,7 +5272,8 @@ DumpFocusInfo()
 	}
 }
 
-static void
+// Returns whether the pass changed what gets painted.
+static bool
 determine_and_apply_focus( global_focus_t *pFocus )
 {
 	gamescope_xwayland_server_t *root_server = wlserver_get_xwayland_server(0);
@@ -5729,6 +5739,29 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	}
 
 	pFocus->ulCurrentFocusSerial = GetFocusSerial();
+
+	return pFocus->focusWindow != previousLocalFocus.focusWindow ||
+		pFocus->overrideWindow != previousLocalFocus.overrideWindow ||
+		pFocus->overlayWindow != previousLocalFocus.overlayWindow ||
+		pFocus->externalOverlayWindow != previousLocalFocus.externalOverlayWindow ||
+		pFocus->notificationWindow != previousLocalFocus.notificationWindow ||
+		pFocus->inputFocusWindow != previousLocalFocus.inputFocusWindow ||
+		pFocus->cursor != previousLocalFocus.cursor;
+}
+
+static void
+apply_dirty_focuses()
+{
+	for ( auto &iter : g_VirtualConnectorFocuses )
+	{
+		global_focus_t *pFocus = &iter.second;
+		if ( pFocus->IsDirty() && determine_and_apply_focus( pFocus ) )
+			hasRepaint = true;
+	}
+
+	// Checked apart from IsDirty, as another thread can dirty focus inside a pass that absorbs its serial.
+	if ( s_bFocusDirtyRepaint.exchange( false ) )
+		hasRepaint = true;
 }
 
 static void
@@ -6554,14 +6587,14 @@ damage_win(xwayland_ctx_t *ctx, XDamageNotifyEvent *de)
 	// windows to have meaningful frames.
 	/// FIXME APPID FOCUS STRATERGY FOR 
 	if (bHasAppID && bCareAboutWindow && w->xwayland().damage_sequence == 0)
-		MakeFocusDirty();
+		MakeFocusPickDirty();
 
 	w->xwayland().damage_sequence = damageSequence++;
 
 	// If we just passed the focused window, we might be eliglible to take over
 	if ( focus && focus != w && bHasAppID && bCareAboutWindow &&
 		w->xwayland().damage_sequence > focus->xwayland().damage_sequence)
-		MakeFocusDirty();
+		MakeFocusPickDirty();
 
 	// Josh: This will sometimes cause a BadDamage error.
 	// I looked around at different compositors to see what
@@ -10726,15 +10759,7 @@ steamcompmgr_main(int argc, char **argv)
 
 			UpdateMangoappInstances();
 
-			for ( auto &iter : g_VirtualConnectorFocuses )
-			{
-				global_focus_t *pFocus = &iter.second;
-				if ( pFocus->IsDirty() )
-				{
-					determine_and_apply_focus( pFocus );
-					hasRepaint = true;
-				}
-			}
+			apply_dirty_focuses();
 		}
 
 		// If our DRM state is out-of-date, refresh it. This might update
@@ -11045,15 +11070,7 @@ steamcompmgr_main(int argc, char **argv)
 		// Handles if we got a commit for the window we want to focus
 		// to switch to it for painting (outdatedInteractiveFocus)
 		// Doesn't realllly matter but avoids an extra frame of being on the wrong window.
-		for ( auto &iter : g_VirtualConnectorFocuses )
-		{
-			global_focus_t *pFocus = &iter.second;
-			if ( pFocus->IsDirty() )
-			{
-				determine_and_apply_focus( pFocus );
-				hasRepaint = true;
-			}
-		}
+		apply_dirty_focuses();
 
 		if ( g_bPendingFocusInfo.exchange( false ) )
 			DumpFocusInfo();
