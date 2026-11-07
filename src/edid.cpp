@@ -4,6 +4,7 @@
 #include "log.hpp"
 #include "hdmi.h"
 
+#include <algorithm>
 #include <cassert>
 #include <climits>
 #include <cstring>
@@ -86,7 +87,27 @@ namespace gamescope
         if (nits == 0.0f)
             return 0;
 
-        return ceilf((logf(nits / 50.0f) / logf(2.0f)) * 32.0f);
+        // 0 means unset, so anything above it encodes to at least 1.
+        return uint8_t(std::clamp(ceilf((logf(nits / 50.0f) / logf(2.0f)) * 32.0f), 1.0f, 255.0f));
+    }
+
+    // Opens uSize zeroed bytes at uOffset in a CTA extension's data block collection,
+    // moving everything after it, DTDs included, back. Leaves the block untouched
+    // if the DTDs would run into the checksum.
+    static bool cta_insert_space(uint8_t *ext_data, uint32_t uOffset, uint32_t uSize)
+    {
+        const uint32_t uDtdStart = ext_data[2];
+        uint32_t uDtdEnd = uDtdStart;
+        while (uDtdEnd + EDID_BYTE_DESCRIPTOR_SIZE <= EDID_BLOCK_SIZE - 1 && (ext_data[uDtdEnd] || ext_data[uDtdEnd + 1]))
+            uDtdEnd += EDID_BYTE_DESCRIPTOR_SIZE;
+
+        if (uDtdEnd + uSize > EDID_BLOCK_SIZE - 1)
+            return false;
+
+        memmove(&ext_data[uOffset + uSize], &ext_data[uOffset], uDtdEnd - uOffset);
+        memset(&ext_data[uOffset], 0, uSize);
+        ext_data[2] = uint8_t(uDtdStart + uSize);
+        return true;
     }
 
     std::optional<std::vector<uint8_t>> PatchEdid( std::span<const uint8_t> pEdid, const BackendConnectorHDRInfo &hdrInfo, bool bRotate )
@@ -148,99 +169,108 @@ namespace gamescope
             0, /* desired content min luminance -- 0 is technically "undefined" */
         };
 
-        int ext_count = int(edid.size() / EDID_BLOCK_SIZE) - 1;
-        assert(ext_count == edid[0x7E]);
+        // HDMI 2.1 EDIDs with an HF-EEODB have more extension blocks than byte 0x7E says.
+        const int ext_count = int(edid.size() / EDID_BLOCK_SIZE) - 1;
+        if (ext_count != edid[0x7E])
+            edid_log.infof("EDID has %d extension blocks, its header says %u.", ext_count, edid[0x7E]);
+
         bool has_cta_block = false;
         bool has_hdr_metadata_block = false;
+        std::vector<uint8_t *> insert_candidates;
 
         for (int i = 0; i < ext_count; i++)
         {
             uint8_t *ext_data = &edid[EDID_BLOCK_SIZE + i * EDID_BLOCK_SIZE];
-            uint8_t tag = ext_data[0];
-            if (tag == DI_EDID_EXT_CEA)
+            if (ext_data[0] != DI_EDID_EXT_CEA)
+                continue;
+
+            has_cta_block = true;
+            // A DTD offset of 0 means no data blocks or DTDs, otherwise it has to point inside the block.
+            const int CTA_HEADER_SIZE = 4;
+            if (ext_data[2] < CTA_HEADER_SIZE || ext_data[2] >= EDID_BLOCK_SIZE)
             {
-                has_cta_block = true;
-                uint8_t dtd_start = ext_data[2];
-                uint8_t flags = ext_data[3];
-                if (dtd_start == 0)
+                edid_log.infof("CTA block %d has no usable data blocks, skipping.", i + 1);
+                continue;
+            }
+
+            bool patched = false;
+            int j = CTA_HEADER_SIZE;
+            while (j < ext_data[2])
+            {
+                uint8_t data_block_tag = get_bit_range(ext_data[j], 7, 5);
+                uint8_t data_block_size = get_bit_range(ext_data[j], 4, 0);
+
+                if (j + 1 + data_block_size > ext_data[2])
                 {
-                    edid_log.infof("Hmmmm.... dtd start is 0. Interesting... Not going further! :-(");
-                    continue;
+                    edid_log.infof("Ignoring the rest of CTA block %d, it is malformed.", i + 1);
+                    break;
                 }
-                if (flags != 0)
+
+                // Extended tag 6 is HDR static metadata.
+                if (data_block_tag == 7 && data_block_size >= 1 && ext_data[j + 1] == 6)
                 {
-                    edid_log.infof("Hmmmm.... non-zero CTA flags. Interesting... Not going further! :-(");
-                    continue;
-                }
-
-                const int CTA_HEADER_SIZE = 4;
-                int j = CTA_HEADER_SIZE;
-                while (j < dtd_start)
-                {
-                    uint8_t data_block_header = ext_data[j];
-                    uint8_t data_block_tag = get_bit_range(data_block_header, 7, 5);
-                    uint8_t data_block_size = get_bit_range(data_block_header, 4, 0);
-
-                    if (j + 1 + data_block_size > dtd_start)
+                    has_hdr_metadata_block = true;
+                    const uint8_t existing_size = data_block_size - 1;
+                    if (existing_size < sizeof(new_hdr_static_metadata_block))
                     {
-                        edid_log.infof("Hmmmm.... CTA malformatted. Interesting... Not going further! :-(");
-                        break;
-                    }
-
-                    uint8_t *data_block = &ext_data[j + 1];
-                    if (data_block_tag == 7) // extended
-                    {
-                        uint8_t extended_tag = data_block[0];
-                        uint8_t *extended_block = &data_block[1];
-                        uint8_t extended_block_size = data_block_size - 1;
-
-                        if (extended_tag == 6) // hdr static
+                        // The luminance bytes are optional, grow the block to fit them.
+                        const uint8_t grow = sizeof(new_hdr_static_metadata_block) - existing_size;
+                        if (!cta_insert_space(ext_data, j + 1 + data_block_size, grow))
                         {
-                            if (extended_block_size >= sizeof(new_hdr_static_metadata_block))
-                            {
-                                edid_log.infof("Patching existing HDR Metadata with our own!");
-                                memcpy(extended_block, new_hdr_static_metadata_block, sizeof(new_hdr_static_metadata_block));
-                                has_hdr_metadata_block = true;
-                            }
+                            edid_log.warnf("No room to grow the HDR metadata in CTA block %d.", i + 1);
+                            j += 1 + data_block_size;
+                            continue;
                         }
+                        data_block_size += grow;
+                        set_bit_range(&ext_data[j], 4, 0, data_block_size);
                     }
 
-                    j += 1 + data_block_size; // account for header size.
+                    edid_log.infof("Patching existing HDR Metadata with our own!");
+                    memcpy(&ext_data[j + 2], new_hdr_static_metadata_block, sizeof(new_hdr_static_metadata_block));
+                    patched = true;
                 }
 
-                if (!has_hdr_metadata_block)
-                {
-                    const int hdr_metadata_block_size_plus_headers = sizeof(new_hdr_static_metadata_block) + 2; // +1 for header, +1 for extended header -> +2
-                    edid_log.infof("No HDR metadata block to patch... Trying to insert one.");
+                j += 1 + data_block_size; // account for header size.
+            }
 
-                    // Assert that the end of the data blocks == dtd_start
-                    if (dtd_start != j)
-                    {
-                        edid_log.infof("dtd_start != end of blocks. Giving up patching. I'm too scared to attempt it.");
-                    }
+            if (j == ext_data[2])
+                insert_candidates.push_back(ext_data);
 
-                    // Move back the dtd to make way for our block at the end.
-                    uint8_t *dtd = &ext_data[dtd_start];
-                    memmove(dtd + hdr_metadata_block_size_plus_headers, dtd, hdr_metadata_block_size_plus_headers);
-                    dtd_start += hdr_metadata_block_size_plus_headers;
+            if (patched)
+                patch_edid_checksum(ext_data);
+        }
 
-                    // Data block is where the dtd was.
-                    uint8_t *data_block = dtd;
+        if (!has_hdr_metadata_block && has_cta_block)
+        {
+            const uint8_t hdr_metadata_block_size_plus_headers = sizeof(new_hdr_static_metadata_block) + 2; // +1 for header, +1 for extended header -> +2
+            edid_log.infof("No HDR metadata block to patch... Trying to insert one.");
 
-                    // header
-                    data_block[0] = 0;
-                    set_bit_range(&data_block[0], 7, 5, 7); // extended tag
-                    set_bit_range(&data_block[0], 4, 0, sizeof(new_hdr_static_metadata_block) + 1); // size (+1 for extended header, does not include normal header)
+            bool inserted = false;
+            for (uint8_t *ext_data : insert_candidates)
+            {
+                // Append it to the end of the data block collection.
+                const uint8_t dtd_start = ext_data[2];
+                if (!cta_insert_space(ext_data, dtd_start, hdr_metadata_block_size_plus_headers))
+                    continue;
 
-                    // extended header
-                    data_block[1] = 6; // hdr metadata extended tag
-                    memcpy(&data_block[2], new_hdr_static_metadata_block, sizeof(new_hdr_static_metadata_block));
-                }
+                uint8_t *data_block = &ext_data[dtd_start];
+
+                // header
+                data_block[0] = 0;
+                set_bit_range(&data_block[0], 7, 5, 7); // extended tag
+                set_bit_range(&data_block[0], 4, 0, sizeof(new_hdr_static_metadata_block) + 1); // size (+1 for extended header, does not include normal header)
+
+                // extended header
+                data_block[1] = 6; // hdr metadata extended tag
+                memcpy(&data_block[2], new_hdr_static_metadata_block, sizeof(new_hdr_static_metadata_block));
 
                 patch_edid_checksum(ext_data);
-                bool sum_valid = validate_block_checksum(ext_data);
-                edid_log.infof("CTA Checksum valid? %s", sum_valid ? "Y" : "N");
+                inserted = true;
+                break;
             }
+
+            if (!inserted)
+                edid_log.infof("Couldn't insert HDR metadata into any CTA block. Giving up patching.");
         }
 
         if (!has_cta_block)
