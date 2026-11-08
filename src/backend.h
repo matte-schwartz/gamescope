@@ -119,6 +119,8 @@ namespace gamescope
         // but don't want to expose HDR there as it is not good.
         bool bExposeHDRSupport = false;
         bool bAlwaysPatchEdid = false;
+        // A display script set luminance, publish it in the EDID games read.
+        bool bPatchEdidLuminance = false;
         // Only drive a panel in HDR while an HDR app is running.
         bool bContentDrivenHDR = false;
         // Panel ignores hardware backlight control in PQ, follow it in software.
@@ -141,7 +143,7 @@ namespace gamescope
 
         bool ShouldPatchEDID() const
         {
-            return bAlwaysPatchEdid || IsHDRG22();
+            return bAlwaysPatchEdid || IsHDRG22() || ( bPatchEdidLuminance && bExposeHDRSupport );
         }
 
         bool IsHDR10() const

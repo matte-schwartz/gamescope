@@ -2829,6 +2829,8 @@ namespace gamescope
 		if ( ofScriptMinCLL )
 			m_Mutable.HDR.uMinContentLightLevel = nits_to_u16_dark( *ofScriptMinCLL );
 
+		m_Mutable.HDR.bPatchEdidLuminance = ofScriptMaxCLL || ofScriptMaxFALL;
+
 		// Generate a default HDR10 infoframe.
 		if ( m_Mutable.HDR.IsHDR10() )
 		{

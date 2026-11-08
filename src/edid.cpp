@@ -91,6 +91,25 @@ namespace gamescope
         return uint8_t(std::clamp(ceilf((logf(nits / 50.0f) / logf(2.0f)) * 32.0f), 1.0f, 255.0f));
     }
 
+    static float decode_max_luminance(uint8_t cv)
+    {
+        return 50.0f * exp2f(cv / 32.0f);
+    }
+
+    // CTA-861 stores the minimum relative to the maximum: min = max * (cv / 255)^2 / 100.
+    static uint8_t encode_min_luminance(float min_nits, float max_nits)
+    {
+        if (min_nits <= 0.0f || max_nits <= 0.0f)
+            return 0;
+
+        return uint8_t(std::min(255.0f, roundf(255.0f * sqrtf(min_nits * 100.0f / max_nits))));
+    }
+
+    static float decode_min_luminance(uint8_t cv, float max_nits)
+    {
+        return max_nits * (cv / 255.0f) * (cv / 255.0f) / 100.0f;
+    }
+
     // Opens uSize zeroed bytes at uOffset in a CTA extension's data block collection,
     // moving everything after it, DTDs included, back. Leaves the block untouched
     // if the DTDs would run into the checksum.
@@ -147,6 +166,9 @@ namespace gamescope
         // (Allows for debugging undocked fallback without undocking/redocking)
         if ( !hdrInfo.ShouldPatchEDID() )
             return bRotate ? std::optional( edid ) : std::nullopt;
+
+        // A display script's luminance only replaces the luminance bytes.
+        const bool bLuminanceOnly = !hdrInfo.bAlwaysPatchEdid && !hdrInfo.IsHDRG22();
 
         // TODO: Allow for override of min luminance
 #if 0
@@ -225,8 +247,30 @@ namespace gamescope
                         set_bit_range(&ext_data[j], 4, 0, data_block_size);
                     }
 
+                    uint8_t hdr_block[sizeof(new_hdr_static_metadata_block)];
+                    memcpy(hdr_block, new_hdr_static_metadata_block, sizeof(hdr_block));
+                    if (bLuminanceOnly)
+                    {
+                        // Keep luminance bytes that already decode to gamescope's values, re-encoding
+                        // can move them a step. Bytes the block didn't have were zeroed when it grew.
+                        const uint8_t *existing = &ext_data[j + 2];
+                        memcpy(hdr_block, existing, std::min<size_t>(existing_size, 2));
+                        if (existing[2] && nits_to_u16(decode_max_luminance(existing[2])) == hdrInfo.uMaxContentLightLevel)
+                            hdr_block[2] = existing[2];
+                        if (existing[3] && nits_to_u16(decode_max_luminance(existing[3])) == hdrInfo.uMaxFrameAverageLuminance)
+                            hdr_block[3] = existing[3];
+                        // Never publish an average above the peak.
+                        if (hdr_block[2])
+                            hdr_block[3] = std::min(hdr_block[3], hdr_block[2]);
+
+                        const float max_nits = decode_max_luminance(hdr_block[2]);
+                        hdr_block[4] = nits_to_u16_dark(decode_min_luminance(existing[4], max_nits)) == hdrInfo.uMinContentLightLevel
+                            ? existing[4]
+                            : encode_min_luminance(hdrInfo.uMinContentLightLevel / 10000.0f, max_nits);
+                    }
+
                     edid_log.infof("Patching existing HDR Metadata with our own!");
-                    memcpy(&ext_data[j + 2], new_hdr_static_metadata_block, sizeof(new_hdr_static_metadata_block));
+                    memcpy(&ext_data[j + 2], hdr_block, sizeof(hdr_block));
                     patched = true;
                 }
 
@@ -240,7 +284,7 @@ namespace gamescope
                 patch_edid_checksum(ext_data);
         }
 
-        if (!has_hdr_metadata_block && has_cta_block)
+        if (!has_hdr_metadata_block && has_cta_block && !bLuminanceOnly)
         {
             const uint8_t hdr_metadata_block_size_plus_headers = sizeof(new_hdr_static_metadata_block) + 2; // +1 for header, +1 for extended header -> +2
             edid_log.infof("No HDR metadata block to patch... Trying to insert one.");
