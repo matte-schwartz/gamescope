@@ -2807,7 +2807,7 @@ namespace gamescope
 				m_Mutable.HDR.uMaxFrameAverageLuminance =
 					pHDRStaticMetadata->desired_content_max_frame_avg_luminance
 					? nits_to_u16( pHDRStaticMetadata->desired_content_max_frame_avg_luminance )
-					: nits_to_u16( std::min( 799.f, nits_from_u16( m_Mutable.HDR.uMaxContentLightLevel ) ) );
+					: nits_to_u16( std::min( 799.f, ofScriptMaxCLL ? *ofScriptMaxCLL : nits_from_u16( m_Mutable.HDR.uMaxContentLightLevel ) ) );
 				m_Mutable.HDR.uMinContentLightLevel =
 					pHDRStaticMetadata->desired_content_min_luminance
 					? nits_to_u16_dark( pHDRStaticMetadata->desired_content_min_luminance )
@@ -2824,6 +2824,8 @@ namespace gamescope
 			m_Mutable.HDR.uMaxContentLightLevel = nits_to_u16( *ofScriptMaxCLL );
 		if ( ofScriptMaxFALL )
 			m_Mutable.HDR.uMaxFrameAverageLuminance = nits_to_u16( *ofScriptMaxFALL );
+		else if ( ofScriptMaxCLL )
+			m_Mutable.HDR.uMaxFrameAverageLuminance = std::min( m_Mutable.HDR.uMaxFrameAverageLuminance, m_Mutable.HDR.uMaxContentLightLevel );
 		if ( ofScriptMinCLL )
 			m_Mutable.HDR.uMinContentLightLevel = nits_to_u16_dark( *ofScriptMinCLL );
 
