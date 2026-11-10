@@ -2251,7 +2251,7 @@ bool MouseCursor::getTexture()
 
 	if (image->width && image->height)
 	{
-		if ( nDesiredWidth < image->width || nDesiredHeight < image->height )
+		if ( nDesiredWidth != image->width || nDesiredHeight != image->height )
 		{
 			std::vector<uint32_t> pixels(image->width * image->height);
 			for (int i = 0; i < image->height; i++)
@@ -2355,17 +2355,21 @@ bool MouseCursor::getTexture()
 
 void MouseCursor::GetDesiredSize( int& nWidth, int &nHeight )
 {
+	int nLongest = std::max( nWidth, nHeight );
+	if ( nLongest <= 0 )
+		return;
+
 	int nSize = g_nBaseCursorScale;
 	if ( g_nCursorScaleHeight > 0 )
 	{
-		nSize = nSize * floor(g_nOutputHeight / (float)g_nCursorScaleHeight);
+		nSize = lround( nSize * g_nOutputHeight / (float)g_nCursorScaleHeight );
 		nSize = std::clamp( nSize, g_nBaseCursorScale, 256 );
 	}
 
 	nSize = std::min<int>( nSize, glm::compMin( GetBackend()->CursorSurfaceSize( glm::uvec2{ (uint32_t)nSize, (uint32_t)nSize } ) ) );
 
-	nWidth = nSize;
-	nHeight = nSize;
+	nWidth = std::max<int>( 1, lround( nWidth * nSize / (float)nLongest ) );
+	nHeight = std::max<int>( 1, lround( nHeight * nSize / (float)nLongest ) );
 }
 
 void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, struct FrameInfo_t *frameInfo)
@@ -2394,7 +2398,8 @@ void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, str
 	float cursor_scale = 1.0f;
 	if ( g_nCursorScaleHeight > 0 )
 	{
-		int nDesiredWidth, nDesiredHeight;
+		int nDesiredWidth = m_texture->contentWidth();
+		int nDesiredHeight = m_texture->contentHeight();
 		GetDesiredSize( nDesiredWidth, nDesiredHeight );
 		cursor_scale = nDesiredHeight / (float)m_texture->contentHeight();
 	}
