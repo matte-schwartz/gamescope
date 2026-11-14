@@ -6308,6 +6308,21 @@ restack_win(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, Window new_above)
 	}
 }
 
+// The layer stops bypassing Xwayland once other windows show up in the toplevel.
+static void
+note_subwindow_change(xwayland_ctx_t *ctx, Window parent, Window window)
+{
+	if (parent == window)
+		return;
+
+	steamcompmgr_win_t *w = find_win(ctx, parent, false);
+	if (w && w->override_surface())
+	{
+		w->ulSubwindowChangeTime = get_time_in_nanos();
+		w->uOverrideFramesSinceSubwindowChange = 0;
+	}
+}
+
 static void
 configure_win(xwayland_ctx_t *ctx, XConfigureEvent *ce)
 {
@@ -8708,11 +8723,25 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 
 	bool for_current_surface = !w->override_surface() || w->current_surface() == reslistentry.surf;
 
+	// Xwayland still holds whatever was there before the client started
+	// bypassing it, and presents to windows it clips away damage the surface
+	// without drawing. Keep the override's frame while the client moves over.
+	// A client that keeps bypassing has only its queued frames left to show
+	// before the layer has looked at the new window tree.
+	if ( w->ulSubwindowChangeTime && w->override_surface() && for_current_surface )
+		w->uOverrideFramesSinceSubwindowChange++;
+	if ( w->uOverrideFramesSinceSubwindowChange > 3 || get_time_in_nanos() - w->ulSubwindowChangeTime > 1'000'000'000ul )
+		w->ulSubwindowChangeTime = 0;
+	const bool bStale = !for_current_surface && w->ulSubwindowChangeTime;
+	if ( bStale )
+		AppendPendingDamage( w->overrideBlitPendingDamage, reslistentry.damage );
+
 	if ( !w->override_surface() )
 	{
 		w->overrideBlitImages.clear();
 		w->uNextOverrideBlitImage = 0;
 		w->overrideBlitPendingDamage.clear();
+		w->ulSubwindowChangeTime = 0;
 	}
 
 	if ( !for_current_surface )
@@ -8720,7 +8749,7 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 		xwm_log.debugf( "Got commit not for current surface." );
 	}
 
-	if ( bOnlyCurrentSurface && !for_current_surface )
+	if ( ( bOnlyCurrentSurface && !for_current_surface ) || bStale )
 	{
 		wlserver_lock();
 		wlserver_present_timing_discard( reslistentry.present_timing );
@@ -8965,6 +8994,10 @@ void check_new_xwayland_res(xwayland_ctx_t *ctx)
 	// wayland_commit_queue lock because that causes deadlocks.
 	std::vector<ResListEntry_t>& tmp_queue = ctx->xwayland_server->retrieve_commits();
 
+	// Xwayland sends a commit along with the events for what caused it.
+	if ( !tmp_queue.empty() && XPending( ctx->dpy ) )
+		ctx->Dispatch();
+
 	for ( uint32_t i = 0; i < tmp_queue.size(); i++ )
 	{
 		steamcompmgr_win_t	*w = find_win( ctx, tmp_queue[ i ].surf );
@@ -9127,6 +9160,7 @@ void xwayland_ctx_t::Dispatch()
 					add_win(ctx, ev.xcreatewindow.window, 0, ev.xcreatewindow.serial);
 				break;
 			case ConfigureNotify:
+				note_subwindow_change(ctx, ev.xconfigure.event, ev.xconfigure.window);
 				configure_win(ctx, &ev.xconfigure);
 				break;
 			case DestroyNotify:
@@ -9139,6 +9173,8 @@ void xwayland_ctx_t::Dispatch()
 			}
 			case MapNotify:
 			{
+				note_subwindow_change(ctx, ev.xmap.event, ev.xmap.window);
+
 				steamcompmgr_win_t * w = find_win(ctx, ev.xmap.window);
 
 				if (w && w->xwayland().id == ev.xmap.window)
@@ -9151,6 +9187,8 @@ void xwayland_ctx_t::Dispatch()
 			}
 			case UnmapNotify:
 			{
+				note_subwindow_change(ctx, ev.xunmap.event, ev.xunmap.window);
+
 				steamcompmgr_win_t * w = find_win(ctx, ev.xunmap.window);
 
 				if (w && w->xwayland().id == ev.xunmap.window)
