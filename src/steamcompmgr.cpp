@@ -6308,6 +6308,21 @@ restack_win(xwayland_ctx_t *ctx, steamcompmgr_win_t *w, Window new_above)
 	}
 }
 
+// The layer stops bypassing Xwayland once other windows show up in the toplevel.
+static void
+note_subwindow_change(xwayland_ctx_t *ctx, Window parent, Window window)
+{
+	if (parent == window)
+		return;
+
+	steamcompmgr_win_t *w = find_win(ctx, parent, false);
+	if (w && w->override_surface())
+	{
+		w->ulSubwindowChangeTime = get_time_in_nanos();
+		w->uOverrideFramesSinceSubwindowChange = 0;
+	}
+}
+
 static void
 configure_win(xwayland_ctx_t *ctx, XConfigureEvent *ce)
 {
@@ -8671,6 +8686,36 @@ static std::optional<uint64_t> MergeBlitsOverOverride( steamcompmgr_win_t *w, co
 	return ulSeqNo;
 }
 
+// Frames a client can still have queued when the window tree changes, and the wait for one that never presents.
+static constexpr uint32_t k_uSubwindowChangeHoldFrames = 4;
+static constexpr uint64_t k_ulSubwindowChangeHoldTime = 1'000'000'000ul;
+
+static bool DamageCoversBuffer( const ResListEntry_t &entry )
+{
+	pixman_region32_t region;
+	pixman_region32_init_rects( &region, entry.damage.data(), int( entry.damage.size() ) );
+	pixman_box32_t box = { 0, 0, entry.buf->width, entry.buf->height };
+	const bool bCovers = pixman_region32_contains_rectangle( &region, &box ) == PIXMAN_REGION_IN;
+	pixman_region32_fini( &region );
+	return bCovers;
+}
+
+struct SubwindowChangeScan_t
+{
+	Window toplevel;
+	bool bFound;
+};
+
+// Never matches, so the events stay queued for Dispatch.
+static Bool ScanForSubwindowChange( Display *, XEvent *pEvent, XPointer pArg )
+{
+	SubwindowChangeScan_t *pScan = reinterpret_cast<SubwindowChangeScan_t *>( pArg );
+	if ( ( pEvent->type == MapNotify && pEvent->xmap.event == pScan->toplevel && pEvent->xmap.window != pScan->toplevel ) ||
+		 ( pEvent->type == UnmapNotify && pEvent->xunmap.event == pScan->toplevel && pEvent->xunmap.window != pScan->toplevel ) )
+		pScan->bFound = true;
+	return False;
+}
+
 gamescope::ConVar<bool> cv_surface_update_force_only_current_surface( "surface_update_force_only_current_surface", false, "Force updates to apply only to the current surface, ignoring commits for other surfaces." );
 
 void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, steamcompmgr_win_t *w, ResListEntry_t& reslistentry)
@@ -8708,11 +8753,33 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 
 	bool for_current_surface = !w->override_surface() || w->current_surface() == reslistentry.surf;
 
+	// Xwayland commits its whole stale copy of the toplevel when the window tree changes under a bypassing client.
+	if ( w->ulSubwindowChangeTime && w->override_surface() && for_current_surface )
+		w->uOverrideFramesSinceSubwindowChange++;
+	if ( w->uOverrideFramesSinceSubwindowChange >= k_uSubwindowChangeHoldFrames || get_time_in_nanos() - w->ulSubwindowChangeTime > k_ulSubwindowChangeHoldTime )
+		w->ulSubwindowChangeTime = 0;
+	const bool bCoversOverride = !for_current_surface && w->override_surface() && DamageCoversBuffer( reslistentry );
+	// The events for a window tree change can still be queued behind the commit it caused, a round trip brings them in.
+	if ( bCoversOverride && !w->ulSubwindowChangeTime && w->type == steamcompmgr_win_type_t::XWAYLAND )
+	{
+		SubwindowChangeScan_t scan = { w->xwayland().id, false };
+		XEvent event;
+		XSync( w->xwayland().ctx->dpy, False );
+		XCheckIfEvent( w->xwayland().ctx->dpy, &event, ScanForSubwindowChange, reinterpret_cast<XPointer>( &scan ) );
+		if ( scan.bFound )
+		{
+			w->ulSubwindowChangeTime = get_time_in_nanos();
+			w->uOverrideFramesSinceSubwindowChange = 0;
+		}
+	}
+	const bool bStale = bCoversOverride && w->ulSubwindowChangeTime;
+
 	if ( !w->override_surface() )
 	{
 		w->overrideBlitImages.clear();
 		w->uNextOverrideBlitImage = 0;
 		w->overrideBlitPendingDamage.clear();
+		w->ulSubwindowChangeTime = 0;
 	}
 
 	if ( !for_current_surface )
@@ -8720,7 +8787,7 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 		xwm_log.debugf( "Got commit not for current surface." );
 	}
 
-	if ( bOnlyCurrentSurface && !for_current_surface )
+	if ( ( bOnlyCurrentSurface && !for_current_surface ) || bStale )
 	{
 		wlserver_lock();
 		wlserver_present_timing_discard( reslistentry.present_timing );
@@ -9139,6 +9206,8 @@ void xwayland_ctx_t::Dispatch()
 			}
 			case MapNotify:
 			{
+				note_subwindow_change(ctx, ev.xmap.event, ev.xmap.window);
+
 				steamcompmgr_win_t * w = find_win(ctx, ev.xmap.window);
 
 				if (w && w->xwayland().id == ev.xmap.window)
@@ -9151,6 +9220,8 @@ void xwayland_ctx_t::Dispatch()
 			}
 			case UnmapNotify:
 			{
+				note_subwindow_change(ctx, ev.xunmap.event, ev.xunmap.window);
+
 				steamcompmgr_win_t * w = find_win(ctx, ev.xunmap.window);
 
 				if (w && w->xwayland().id == ev.xunmap.window)
