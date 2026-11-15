@@ -8772,7 +8772,9 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 			w->uOverrideFramesSinceSubwindowChange = 0;
 		}
 	}
-	const bool bStale = bCoversOverride && w->ulSubwindowChangeTime;
+	// The override this was committed under is gone, and the layer has Xwayland commit again once it holds the client's frame.
+	const bool bHandover = !w->override_surface() && reslistentry.bOverridden;
+	const bool bStale = ( bCoversOverride && w->ulSubwindowChangeTime ) || bHandover;
 
 	if ( !w->override_surface() )
 	{

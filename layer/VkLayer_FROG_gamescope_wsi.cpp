@@ -581,6 +581,9 @@ namespace GamescopeWSILayer {
 
     // Cached for comparison.
     std::optional<VkRect2D> cachedWindowRect;
+    // A swapchain that stopped bypassing and still holds the toplevel's override.
+    VkSwapchainKHR supersededSwapchain = VK_NULL_HANDLE;
+    xcb::PresentListener supersededListener;
 
     bool isWayland() const {
       // Is native Wayland?
@@ -1508,7 +1511,14 @@ namespace GamescopeWSILayer {
             VkSwapchainKHR             swapchain,
       const VkAllocationCallbacks*     pAllocator) {
       if (auto state = gamescopeSwapchains.find(swapchain)) {
-        gamescope_swapchain_destroy(state->object);
+        if (auto gamescopeSurface = gamescopeSurfaces.find(state->surface)) {
+          if (gamescopeSurface->supersededSwapchain == swapchain) {
+            gamescopeSurface->supersededSwapchain = VK_NULL_HANDLE;
+            gamescopeSurface->supersededListener.stop();
+          }
+        }
+        if (state->object)
+          gamescope_swapchain_destroy(state->object);
         wl_event_queue_destroy(state->eventQueue);
       }
       gamescopeSwapchains.erase(swapchain);
@@ -1557,6 +1567,10 @@ namespace GamescopeWSILayer {
           // we NULL out oldSwapchain, as they'll be for different surfaces and swapchain types.
           if (gamescopeSwapchain->isBypassingXWayland != canBypass)
             swapchainInfo.oldSwapchain = VK_NULL_HANDLE;
+          if (gamescopeSwapchain->isBypassingXWayland && !canBypass && !gamescopeSurface->isWayland()) {
+            gamescopeSurface->supersededSwapchain = pCreateInfo->oldSwapchain;
+            gamescopeSurface->supersededListener.listen(gamescopeSurface->connection, gamescopeSurface->window);
+          }
         }
       }
 
@@ -2109,6 +2123,23 @@ namespace GamescopeWSILayer {
             continue;
           }
 
+          // The swapchain the client left still holds the toplevel's override,
+          // and an idle client may never destroy it. Give the toplevel back
+          // once Xwayland has this frame, then have it commit so the frame
+          // gamescope shows first is one made after the override went away.
+          if (!gamescopeSwapchain->isBypassingXWayland && gamescopeSurface->supersededSwapchain != VK_NULL_HANDLE) {
+            gamescopeSurface->supersededListener.wait();
+            if (auto superseded = gamescopeSwapchains.find(gamescopeSurface->supersededSwapchain)) {
+              if (superseded->object) {
+                gamescope_swapchain_destroy(superseded->object);
+                superseded->object = nullptr;
+                wl_display_roundtrip_queue(gamescopeSwapchain->display, gamescopeSwapchain->eventQueue);
+                xcb::damageWindow(gamescopeSurface->connection, gamescopeSurface->window, gamescopeSwapchain->extent);
+              }
+            }
+            gamescopeSurface->supersededSwapchain = VK_NULL_HANDLE;
+          }
+
           const bool canBypass = gamescopeSurface->canBypassXWayland(gamescopeSwapchain->isHdrColorspace);
           if (canBypass != gamescopeSwapchain->isBypassingXWayland) {
             if (canBypass) {
@@ -2118,6 +2149,9 @@ namespace GamescopeWSILayer {
               // Stay out of date like a driver swapchain, zink only recreates on acquire.
               *gamescopeSwapchain->retired = true;
               UpdateSwapchainResult(VK_ERROR_OUT_OF_DATE_KHR);
+
+              // A client with nothing new to draw would never recreate.
+              xcb::exposeWindow(gamescopeSurface->connection, gamescopeSurface->window);
             }
           }
 
@@ -2151,6 +2185,8 @@ namespace GamescopeWSILayer {
           fprintf(stderr, "[Gamescope WSI] SetHdrMetadataEXT: Swapchain %u does not support HDR.\n", i);
           continue;
         }
+        if (!gamescopeSwapchain->object)
+          continue;
 
         const VkHdrMetadataEXT& metadata = pMetadata[i];
         gamescope_swapchain_set_hdr_metadata(

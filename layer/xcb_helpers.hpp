@@ -2,6 +2,10 @@
 
 #include <X11/Xlib-xcb.h>
 #include <xcb/composite.h>
+#include <xcb/damage.h>
+#include <xcb/present.h>
+#include <xcb/xfixes.h>
+#include <unistd.h>
 #include <cstdio>
 #include <optional>
 #include <utility>
@@ -237,6 +241,80 @@ namespace xcb {
 
     return largestExtent;
   }
+
+  // Checked, so an error comes back to us and not to the client's error handler.
+  static bool check(xcb_connection_t* connection, xcb_void_cookie_t cookie) {
+    xcb_generic_error_t* error = xcb_request_check(connection, cookie);
+    free(error);
+    return !error;
+  }
+
+  // Has the client redraw a window whose contents we can't provide.
+  static void exposeWindow(xcb_connection_t* connection, xcb_window_t window) {
+    check(connection, xcb_clear_area_checked(connection, true, window, 0, 0, 0, 0));
+  }
+
+  // Has Xwayland commit the window again without anything being drawn.
+  static void damageWindow(xcb_connection_t* connection, xcb_window_t window, VkExtent2D extent) {
+    xcb_discard_reply(connection, xcb_xfixes_query_version(connection, XCB_XFIXES_MAJOR_VERSION, XCB_XFIXES_MINOR_VERSION).sequence);
+    xcb_discard_reply(connection, xcb_damage_query_version(connection, XCB_DAMAGE_MAJOR_VERSION, XCB_DAMAGE_MINOR_VERSION).sequence);
+
+    const xcb_rectangle_t rect = { 0, 0, uint16_t(extent.width), uint16_t(extent.height) };
+    const xcb_xfixes_region_t region = xcb_generate_id(connection);
+    if (check(connection, xcb_xfixes_create_region_checked(connection, region, 1, &rect))) {
+      check(connection, xcb_damage_add_checked(connection, window, region));
+      check(connection, xcb_xfixes_destroy_region_checked(connection, region));
+    }
+  }
+
+  // Waits for Xwayland to carry out a present of a pixmap to the window. The
+  // requests for it are made after `listen` and before `wait`.
+  struct PresentListener {
+    xcb_connection_t* connection = nullptr;
+    xcb_present_event_t eventId = XCB_NONE;
+    xcb_special_event_t* events = nullptr;
+
+    void listen(xcb_connection_t* connection_, xcb_window_t window) {
+      stop();
+      connection = connection_;
+      eventId = xcb_generate_id(connection);
+      if (!check(connection, xcb_present_select_input_checked(connection, eventId, window, XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY))) {
+        eventId = XCB_NONE;
+        return;
+      }
+      events = xcb_register_for_special_xge(connection, &xcb_present_id, eventId, nullptr);
+    }
+
+    bool listening() const {
+      return events != nullptr;
+    }
+
+    // A client that died mid present never completes it, so this gives up after 100ms.
+    bool wait() {
+      bool completed = false;
+      for (uint32_t i = 0; events && !completed && i < 200; i++) {
+        while (xcb_generic_event_t* event = xcb_poll_for_special_event(connection, events)) {
+          auto* presentEvent = reinterpret_cast<xcb_present_generic_event_t*>(event);
+          if (presentEvent->evtype == XCB_PRESENT_COMPLETE_NOTIFY &&
+              reinterpret_cast<xcb_present_complete_notify_event_t*>(event)->kind == XCB_PRESENT_COMPLETE_KIND_PIXMAP)
+            completed = true;
+          free(event);
+        }
+        if (!completed)
+          usleep(500);
+      }
+      stop();
+      return completed;
+    }
+
+    void stop() {
+      if (events) {
+        xcb_unregister_for_special_event(connection, events);
+        events = nullptr;
+      }
+      eventId = XCB_NONE;
+    }
+  };
 
 }
 

@@ -186,6 +186,7 @@ ResListEntry_t PrepareCommit( struct wlr_surface *surf, struct wlr_buffer *buf )
 		int nDamageRects = 0;
 		pixman_box32_t *pDamageRects = pixman_region32_rectangles( &surf->buffer_damage, &nDamageRects );
 		newEntry.damage.assign( pDamageRects, pDamageRects + nDamageRects );
+		newEntry.bOverridden = true;
 	}
 	wl_surf->present_timing = {};
 	wl_surf->pending_presentation_feedbacks.clear();
@@ -818,6 +819,7 @@ void gamescope_xwayland_server_t::destroy_content_override( struct wlserver_cont
 	content_overrides.erase( co->x11_window );
 	free( co );
 }
+
 void gamescope_xwayland_server_t::destroy_content_override( struct wlserver_x11_surface_info *x11_surface, struct wlr_surface *surf )
 {
 #ifdef GAMESCOPE_SWAPCHAIN_DEBUG

@@ -51,6 +51,8 @@ struct ResListEntry_t {
 	std::shared_ptr<gamescope::CReleaseTimelinePoint> pReleasePoint;
 	pixman_box32_t damageExtents;
 	std::vector<pixman_box32_t> damage;
+	// Committed by Xwayland while another surface was overriding its window.
+	bool bOverridden = false;
 };
 
 // A commit for a surface that is not a toplevel. These are composited as part

@@ -9,10 +9,13 @@ if not cppc.compiles('''
 endif
 dep_xcb = dependency('xcb')
 dep_x11_xcb = dependency('x11-xcb')
+dep_xcb_present = dependency('xcb-present')
+dep_xcb_damage = dependency('xcb-damage')
+dep_xcb_xfixes = dependency('xcb-xfixes')
 wayland_client = dependency('wayland-client')
 
 gamescope_wsi_layer = shared_library('VkLayer_FROG_gamescope_wsi_' + host_machine.cpu_family(), 'VkLayer_FROG_gamescope_wsi.cpp', protocols_client_src,
-  dependencies     : [ vkroots_dep, vulkan_dep, dep_xcb, dep_x11, dep_x11_xcb, glm_dep, wayland_client ],
+  dependencies     : [ vkroots_dep, vulkan_dep, dep_xcb, dep_xcb_present, dep_xcb_damage, dep_xcb_xfixes, dep_x11, dep_x11_xcb, glm_dep, wayland_client ],
   install          : true )
 
 out_lib_dir = join_paths(prefix, lib_dir)
