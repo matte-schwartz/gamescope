@@ -326,6 +326,34 @@ static void wlserver_handle_modifiers(struct wl_listener *listener, void *data)
 	bump_input_counter();
 }
 
+// Volume and power keys only go to the root server.
+static bool wlserver_is_forbidden_keysym( xkb_keysym_t keysym )
+{
+	return keysym == XKB_KEY_XF86AudioLowerVolume ||
+		keysym == XKB_KEY_XF86AudioRaiseVolume ||
+		keysym == XKB_KEY_XF86PowerOff;
+}
+
+// The keys a keyboard enter lists as held. Xwayland drops the release
+// of a key it didn't list, and repeats the ones it did in the new window.
+static std::vector<uint32_t> wlserver_held_keys()
+{
+	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
+	std::vector<uint32_t> keys = wlserver.vecVirtualKeysHeld;
+
+	for ( size_t i = 0; i < keyboard->num_keycodes; i++ )
+	{
+		uint32_t key = keyboard->keycodes[ i ];
+		if ( wlserver_is_forbidden_keysym( xkb_state_key_get_one_sym( keyboard->xkb_state, key + 8 ) ) )
+			continue;
+
+		if ( std::find( keys.begin(), keys.end(), key ) == keys.end() )
+			keys.push_back( key );
+	}
+
+	return keys;
+}
+
 static void wlserver_handle_key(struct wl_listener *listener, void *data)
 {
 	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
@@ -345,10 +373,7 @@ static void wlserver_handle_key(struct wl_listener *listener, void *data)
 	// TODO: Remove the below hack when Steam is shipping
 	// `gamescope_action_binding_manager` in Steam Stable
 	// as it can just use a keybind to grab these always.
-	bool forbidden_key =
-		keysym == XKB_KEY_XF86AudioLowerVolume ||
-		keysym == XKB_KEY_XF86AudioRaiseVolume ||
-		keysym == XKB_KEY_XF86PowerOff;
+	bool forbidden_key = wlserver_is_forbidden_keysym( keysym );
 	if ( ( event->state == WL_KEYBOARD_KEY_STATE_PRESSED || event->state == WL_KEYBOARD_KEY_STATE_RELEASED ) && forbidden_key )
 	{
 		// Always send volume+/- to root server only, to avoid it reaching the game.
@@ -2721,14 +2746,17 @@ void wlserver_keyboardfocus( struct wlr_surface *surface, bool bConstrain )
 		}
 	}
 
-	assert( wlserver.wlr.virtual_keyboard_device != nullptr );
-	wlr_seat_set_keyboard( wlserver.wlr.seat, wlserver.wlr.virtual_keyboard_device );
-
+	// Keep the keyboard in use, the enter carries its modifiers.
 	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard( wlserver.wlr.seat );
 	if ( keyboard == nullptr )
-		wlr_seat_keyboard_notify_enter( wlserver.wlr.seat, surface, nullptr, 0, nullptr);
-	else
-		wlr_seat_keyboard_notify_enter( wlserver.wlr.seat, surface, wlserver.vecVirtualKeysHeld.data(), wlserver.vecVirtualKeysHeld.size(), &keyboard->modifiers);
+	{
+		assert( wlserver.wlr.virtual_keyboard_device != nullptr );
+		keyboard = wlserver.wlr.virtual_keyboard_device;
+		wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
+	}
+
+	std::vector<uint32_t> held = wlserver_held_keys();
+	wlr_seat_keyboard_notify_enter( wlserver.wlr.seat, surface, held.data(), held.size(), &keyboard->modifiers );
 
 	wlserver.kb_focus_surface = surface;
 
