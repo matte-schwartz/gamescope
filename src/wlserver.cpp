@@ -2728,7 +2728,7 @@ void wlserver_keyboardfocus( struct wlr_surface *surface, bool bConstrain )
 	if ( keyboard == nullptr )
 		wlr_seat_keyboard_notify_enter( wlserver.wlr.seat, surface, nullptr, 0, nullptr);
 	else
-		wlr_seat_keyboard_notify_enter( wlserver.wlr.seat, surface, keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+		wlr_seat_keyboard_notify_enter( wlserver.wlr.seat, surface, wlserver.vecVirtualKeysHeld.data(), wlserver.vecVirtualKeysHeld.size(), &keyboard->modifiers);
 
 	wlserver.kb_focus_surface = surface;
 
@@ -2810,8 +2810,13 @@ void wlserver_key( uint32_t key, bool press, uint32_t time )
 
 	wlr_keyboard *keyboard = wlserver.wlr.virtual_keyboard_device;
 
+	std::erase( wlserver.vecVirtualKeysHeld, key );
+
 	if ( !wlserver_process_hotkeys( keyboard, key, press ) )
 	{
+		if ( press )
+			wlserver.vecVirtualKeysHeld.push_back( key );
+
 		assert( keyboard != nullptr );
 		wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
 		wlr_seat_keyboard_notify_key( wlserver.wlr.seat, time, key, press );

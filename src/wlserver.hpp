@@ -237,6 +237,10 @@ struct wlserver_t {
 
     // Sym each held key resolved to at press time, keyed by device and keycode.
     std::map<std::pair<struct wlr_keyboard *, xkb_keycode_t>, xkb_keysym_t> mapPressedHotkeyKeys;
+
+    // Keys sent through wlserver_key that are still down, for the next keyboard enter.
+    // Not kept on the virtual keyboard, as wlroots replays its key list on a keymap change.
+    std::vector<uint32_t> vecVirtualKeysHeld;
 };
 
 extern struct wlserver_t wlserver;
