@@ -32,6 +32,8 @@ struct focus_t
 	uint32_t		inputFocusMode = 0;
 	steamcompmgr_win_t				*overlayWindow = nullptr;
 	steamcompmgr_win_t				*externalOverlayWindow = nullptr;
+	// Additional external overlays, oldest first. Global focus only.
+	std::vector<steamcompmgr_win_t*>	extraExternalOverlayWindows;
 	steamcompmgr_win_t				*notificationWindow = nullptr;
 	steamcompmgr_win_t				*overrideWindow = nullptr;
 	// Earlier overrides still mapped beneath the current one, oldest first. Global focus only.

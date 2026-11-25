@@ -3441,15 +3441,33 @@ paint_all( global_focus_t *pFocus, bool async, bool bRepeatFrame )
 	// If we have any layers that aren't a cursor or overlay, then we have valid contents for presentation.
 	const bool bValidContents = frameInfo.layers.count() > 0;
 
-  	if (externalOverlay && cv_paint_external_overlay_plane )
+	if ( cv_paint_external_overlay_plane )
 	{
-		if (externalOverlay->opacity)
+		const PaintWindowFlags uExternalOverlayFlags = PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter |
+			( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 );
+		int nStillReserved = nReservedLayers;
+
+		if ( externalOverlay && externalOverlay->opacity )
 		{
-			paint_window(pFocus, externalOverlay, externalOverlay, &frameInfo, pFocus->cursor, PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter |
-				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 ) );
+			paint_window( pFocus, externalOverlay, externalOverlay, &frameInfo, pFocus->cursor, uExternalOverlayFlags );
+			nStillReserved--;
 
 			if ( externalOverlay == pFocus->inputFocusWindow && pFocus == GetCurrentMouseFocus() )
 				update_touch_scaling( &frameInfo );
+		}
+
+		// Reserve layers for later windows, dropping the oldest external overlays first.
+		int nVisible = 0;
+		for ( steamcompmgr_win_t *extra : pFocus->extraExternalOverlayWindows )
+			nVisible += extra->opacity ? 1 : 0;
+		int nDrop = nVisible - ( k_nMaxLayers - nStillReserved - frameInfo.layers.count() );
+		if ( nDrop > 0 )
+			focus_log.debugf( "Dropping %d external overlays, out of layers", nDrop );
+
+		for ( steamcompmgr_win_t *extra : pFocus->extraExternalOverlayWindows )
+		{
+			if ( extra->opacity && nDrop-- <= 0 )
+				paint_window( pFocus, extra, extra, &frameInfo, pFocus->cursor, uExternalOverlayFlags );
 		}
 	}
 
@@ -5399,6 +5417,29 @@ determine_and_apply_focus( global_focus_t *pFocus )
 		pFocus->externalOverlayWindow = g_steamcompmgr_xdg_focus.externalOverlayWindow;
 	}
 
+	// Without a connector tag these can't be assigned to an output, so skip them unless there is only one.
+	pFocus->extraExternalOverlayWindows.clear();
+	if ( gamescope::VirtualConnectorIsSingleOutput() )
+	{
+		auto addExtraExternalOverlay = [&]( steamcompmgr_win_t *w )
+		{
+			if ( !w->isExternalOverlay || w->uMangoappMsgType != 0 || w == pFocus->externalOverlayWindow )
+				return;
+			// Skip unmapped windows, they keep their last commit.
+			if ( w->type == steamcompmgr_win_type_t::XWAYLAND && w->xwayland().a.map_state != IsViewable )
+				return;
+			if ( w->type == steamcompmgr_win_type_t::XDG && !w->xdg().surface.mapped )
+				return;
+			pFocus->extraExternalOverlayWindows.push_back( w );
+		};
+		for ( steamcompmgr_win_t *w = root_ctx->list; w; w = w->xwayland().next )
+			addExtraExternalOverlay( w );
+		for ( const auto &window : g_steamcompmgr_xdg_wins )
+			addExtraExternalOverlay( window.get() );
+		std::sort( pFocus->extraExternalOverlayWindows.begin(), pFocus->extraExternalOverlayWindows.end(),
+			[]( steamcompmgr_win_t *a, steamcompmgr_win_t *b ) { return a->seq < b->seq; } );
+	}
+
 	pick_decoration_windows( pFocus );
 
 	bool bUseOverlay = gamescope::VirtualConnectorIsSingleOutput() || gamescope::VirtualConnectorKeyIsSteam( pFocus->ulVirtualFocusKey );
@@ -5447,7 +5488,8 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	// After the VR forwarder has had its say, since it clears both.
 	if ( pFocus->decorationWindows != previousLocalFocus.decorationWindows ||
-		 pFocus->overrideUnderlayWindows != previousLocalFocus.overrideUnderlayWindows )
+		 pFocus->overrideUnderlayWindows != previousLocalFocus.overrideUnderlayWindows ||
+		 pFocus->extraExternalOverlayWindows != previousLocalFocus.extraExternalOverlayWindows )
 		hasRepaintNonBasePlane = true;
 
 	// Pick cursor from our input focus window
@@ -6530,6 +6572,7 @@ destroy_win(xwayland_ctx_t *ctx, Window id, bool gone, bool fade)
 			pFocus->fadeWindow = nullptr;
 		std::erase_if(pFocus->overrideUnderlayWindows, [id](steamcompmgr_win_t *w) { return x11_win(w) == id; });
 		std::erase_if(pFocus->decorationWindows, [id](steamcompmgr_win_t *w) { return x11_win(w) == id; });
+		std::erase_if(pFocus->extraExternalOverlayWindows, [id](steamcompmgr_win_t *w) { return x11_win(w) == id; });
 	}
 
 #if HAVE_PIPEWIRE
@@ -7943,6 +7986,12 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 						pDecoration->xwayland().ctx == server->ctx.get();
 				});
 
+				std::erase_if(pFocus->extraExternalOverlayWindows, [&](steamcompmgr_win_t *pOverlay)
+				{
+					return pOverlay->type == steamcompmgr_win_type_t::XWAYLAND &&
+						pOverlay->xwayland().ctx == server->ctx.get();
+				});
+
 				if (pFocus->keyboardFocusWindow &&
 					pFocus->keyboardFocusWindow->type == steamcompmgr_win_type_t::XWAYLAND &&
 					pFocus->keyboardFocusWindow->xwayland().ctx == server->ctx.get())
@@ -8295,7 +8344,7 @@ static gamescope::CommitQueue::SelectionResult handle_done_commit( steamcompmgr_
 		// creating noticeable VRR flicker in the process.
 		// TODO: fix this properly for all overlays, including Steam notifications and QAM
 		// HACK: If VRR is active, prevent external overlays, i.e. mangoapp, from repainting the base plane
-		if ( ( w == pFocus->externalOverlayWindow && w->opacity != TRANSLUCENT ) &&
+		if ( ( ( w == pFocus->externalOverlayWindow || gamescope::Algorithm::Contains( pFocus->extraExternalOverlayWindows, w ) ) && w->opacity != TRANSLUCENT ) &&
 		     ( GetBackend()->GetCurrentConnector() && !GetBackend()->GetCurrentConnector()->IsVRRActive() ) )
 		{
 			hasRepaintNonBasePlane = true;
@@ -9843,6 +9892,7 @@ void steamcompmgr_check_xdg(bool vblank, uint64_t vblank_idx)
 				pFocus->overlayWindow = nullptr;
 			if (pFocus->externalOverlayWindow && pFocus->externalOverlayWindow->type == steamcompmgr_win_type_t::XDG)
 				pFocus->externalOverlayWindow = nullptr;
+			std::erase_if(pFocus->extraExternalOverlayWindows, [](steamcompmgr_win_t *w) { return w->type == steamcompmgr_win_type_t::XDG; });
 			if (pFocus->notificationWindow && pFocus->notificationWindow->type == steamcompmgr_win_type_t::XDG)
 				pFocus->notificationWindow = nullptr;
 			if (pFocus->overrideWindow && pFocus->overrideWindow->type == steamcompmgr_win_type_t::XDG)
@@ -11172,6 +11222,8 @@ steamcompmgr_main(int argc, char **argv)
 			// TODO: Fix properly.
 			const bool bHasOverlay = ( pPaintFocus->overlayWindow && pPaintFocus->overlayWindow->opacity ) ||
 									( pPaintFocus->externalOverlayWindow && pPaintFocus->externalOverlayWindow->opacity ) ||
+									std::any_of( pPaintFocus->extraExternalOverlayWindows.begin(), pPaintFocus->extraExternalOverlayWindows.end(),
+										[]( steamcompmgr_win_t *w ) { return w->opacity != 0; } ) ||
 									( pPaintFocus->overrideWindow  && pPaintFocus->focusWindow && !pPaintFocus->focusWindow->isSteamStreamingClient && pPaintFocus->overrideWindow->opacity );
 
 			// If we are running behind, allow tearing.
