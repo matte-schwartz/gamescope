@@ -59,6 +59,8 @@ struct wlserver_xdg_surface_info
 	bool bDoneConfigure = false;
 
 	std::atomic<bool> mapped = { false };
+	// Layer surfaces only: 1 requests pointer and keyboard input, 2 requests pointer input.
+	std::atomic<uint32_t> uLayerInputFocusMode = { 0 };
 
 	struct wl_list link;
 

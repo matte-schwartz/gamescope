@@ -959,6 +959,11 @@ gamescope::CAsyncWaiter<gamescope::Rc<commit_t>> g_ImageWaiter{ "gamescope_img" 
 
 gamescope::CWaiter g_SteamCompMgrWaiter;
 
+static bool win_is_layer_overlay( steamcompmgr_win_t *w )
+{
+	return w && w->isExternalOverlay && w->type == steamcompmgr_win_type_t::XDG;
+}
+
 Window x11_win(steamcompmgr_win_t *w) {
 	if (w == nullptr)
 		return None;
@@ -3466,8 +3471,13 @@ paint_all( global_focus_t *pFocus, bool async, bool bRepeatFrame )
 
 		for ( steamcompmgr_win_t *extra : pFocus->extraExternalOverlayWindows )
 		{
-			if ( extra->opacity && nDrop-- <= 0 )
-				paint_window( pFocus, extra, extra, &frameInfo, pFocus->cursor, uExternalOverlayFlags );
+			if ( !extra->opacity || nDrop-- > 0 )
+				continue;
+
+			paint_window( pFocus, extra, extra, &frameInfo, pFocus->cursor, uExternalOverlayFlags );
+
+			if ( extra == pFocus->inputFocusWindow && pFocus == GetCurrentMouseFocus() )
+				update_touch_scaling( &frameInfo );
 		}
 	}
 
@@ -3528,7 +3538,8 @@ paint_all( global_focus_t *pFocus, bool async, bool bRepeatFrame )
 	}
 
 	// Draw cursor if we need to
-	if (input && ShouldDrawCursor() && cv_paint_cursor_plane) {
+	// A layer surface has no window geometry for positioning the cursor.
+	if (input && !win_is_layer_overlay( input ) && ShouldDrawCursor() && cv_paint_cursor_plane) {
 		pFocus->cursor->paint(
 			input, w == input ? fit : nullptr,
 			&frameInfo);
@@ -5224,7 +5235,10 @@ steamcompmgr_xdg_determine_and_apply_focus( const std::vector< steamcompmgr_win_
 			g_steamcompmgr_xdg_focus.overlayWindow = window.get();
 
 		if (window->isExternalOverlay)
+		{
 			g_steamcompmgr_xdg_focus.externalOverlayWindow = window.get();
+			window->inputFocusMode = window->xdg().surface.uLayerInputFocusMode;
+		}
 	}
 
 	gamescope::VirtualConnectorStrategy eStrategy = gamescope::cv_backend_virtual_connector_strategy == gamescope::VirtualConnectorStrategies::SteamControlled
@@ -5291,6 +5305,27 @@ DumpFocusInfo()
 		dump_win( "  Input focus window", ctx->focus.inputFocusWindow );
 		dump_win( "  Override window", ctx->focus.overrideWindow );
 	}
+}
+
+// Topmost mapped layer surface whose keyboard interactivity requests input.
+static steamcompmgr_win_t *
+pick_input_external_overlay( global_focus_t *pFocus )
+{
+	if ( !gamescope::VirtualConnectorIsSingleOutput() )
+		return nullptr;
+
+	auto wantsInput = []( steamcompmgr_win_t *w )
+	{
+		return w && w->type == steamcompmgr_win_type_t::XDG && w->inputFocusMode && w->xdg().surface.mapped;
+	};
+
+	for ( auto iter = pFocus->extraExternalOverlayWindows.rbegin(); iter != pFocus->extraExternalOverlayWindows.rend(); ++iter )
+	{
+		if ( wantsInput( *iter ) )
+			return *iter;
+	}
+
+	return wantsInput( pFocus->externalOverlayWindow ) ? pFocus->externalOverlayWindow : nullptr;
 }
 
 static void
@@ -5455,6 +5490,11 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	{
 		pFocus->inputFocusWindow = pFocus->overlayWindow;
 		pFocus->keyboardFocusWindow = pFocus->overlayWindow;
+	}
+	else if ( steamcompmgr_win_t *pInputOverlay = pick_input_external_overlay( pFocus ) )
+	{
+		pFocus->inputFocusWindow = pInputOverlay;
+		pFocus->keyboardFocusWindow = pInputOverlay;
 	}
 	else
 	{
@@ -5670,27 +5710,35 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	const char *focused_keyboard_display = root_ctx->xwayland_server->get_nested_display_name();
 	const char *focused_mouse_display = root_ctx->xwayland_server->get_nested_display_name();
 
+	// Keep reporting the app beneath an external overlay as focused to Steam.
+	steamcompmgr_win_t *pInputWindowForSteam = pFocus->inputFocusWindow;
+	steamcompmgr_win_t *pKeyboardWindowForSteam = pFocus->keyboardFocusWindow;
+	if ( win_is_layer_overlay( pInputWindowForSteam ) )
+		pInputWindowForSteam = pFocus->focusWindow;
+	if ( win_is_layer_overlay( pKeyboardWindowForSteam ) )
+		pKeyboardWindowForSteam = pFocus->overrideWindow ? pFocus->overrideWindow : pFocus->focusWindow;
+
 	if ( pFocus->focusWindow )
 	{
 		focusedWindow = (unsigned long)pFocus->focusWindow->id();
 		focusedBaseAppId = pFocus->focusWindow->appID;
 		// A focus window does not guarantee an input focus window.
-		if ( pFocus->inputFocusWindow )
-			focusedAppId = pFocus->inputFocusWindow->appID;
+		if ( pInputWindowForSteam )
+			focusedAppId = pInputWindowForSteam->appID;
 		focused_display = get_win_display_name(pFocus->focusWindow);
 		sdFocusWindow_pid = pFocus->focusWindow->pid;
 	}
 
 	g_focusedBaseAppId = (uint32_t)focusedAppId;
 
-	if ( pFocus->inputFocusWindow )
+	if ( pInputWindowForSteam )
 	{
-		focused_mouse_display = get_win_display_name(pFocus->inputFocusWindow);
+		focused_mouse_display = get_win_display_name( pInputWindowForSteam );
 	}
 
-	if ( pFocus->keyboardFocusWindow )
+	if ( pKeyboardWindowForSteam )
 	{
-		focused_keyboard_display = get_win_display_name(pFocus->keyboardFocusWindow);
+		focused_keyboard_display = get_win_display_name( pKeyboardWindowForSteam );
 	}
 
 	if ( pFocus == GetCurrentFocus() )

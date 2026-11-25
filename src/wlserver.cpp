@@ -243,6 +243,23 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 
 			wlserver_xdg_surface_info->bDoneConfigure = true;
 		}
+
+		if ( struct wlr_layer_surface_v1 *pLayerSurface = wlserver_xdg_surface_info->layer_surface )
+		{
+			// An empty input region disables input, other regions are not hit-tested.
+			// Keyboard interactivity selects pointer-only or pointer-and-keyboard input.
+			uint32_t uInputFocusMode = 0;
+			if ( pixman_region32_not_empty( &wlr_surface->input_region ) )
+			{
+				if ( pLayerSurface->current.keyboard_interactive == ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE )
+					uInputFocusMode = 1;
+				else if ( pLayerSurface->current.keyboard_interactive == ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND )
+					uInputFocusMode = 2;
+			}
+
+			if ( wlserver_xdg_surface_info->uLayerInputFocusMode.exchange( uInputFocusMode ) != uInputFocusMode )
+				MakeFocusDirty();
+		}
 	}
 
 	// Committing without buffer state is valid and commits the same buffer again.
